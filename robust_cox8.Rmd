@@ -1,0 +1,2507 @@
+---
+title: "Robust cox model attempt 8"
+author: "Yunwei Zhang"
+date: “`r paste0('Initiated on 20240319, compiled on ', format(Sys.time(), '%Y %b %d'))`”
+output:
+  
+  html_document:
+    code_folding: hide
+    fig_height: 8
+    fig_width: 12
+    highlight: tango
+    number_sections: yes
+    theme: cosmo
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+    number_sections: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE,message = FALSE)
+#usethis::edit_r_environ()
+#R_MAX_VSIZE=700Gb
+```
+
+This file is used to wrap up findings for paper.
+story line: we have justified the modern methods, we proved under their simulation setting, then we combine simulation setting and changing params and then found out that things are more complicated even with a small change.
+
+```{r}
+.libPaths("/dskh/nobackup/yunwei/robust_methods_codes/library")
+setwd("/dskh/nobackup/yunwei/robust_methods_codes")
+library(inline)
+openblas.set.num.threads <- cfunction( signature(ipt="integer"),
+                                       body = "openblas_set_num_threads(*ipt);",
+                                       otherdefs = c ("extern void openblas_set_num_threads(int);"),
+                                       libargs = c ("/usr/lib/x86_64-linux-gnu/openblas-pthread/libblas.so.3"),
+                                       language = "C",
+                                       convention = ".C"
+)
+openblas.set.num.threads(1)
+#install.packages("Matrix",version="1.6.4")
+# #package_version("Matrix")
+library(Matrix)
+#install.packages("htmltools",version="0.5.7")
+#library(htmltools)
+library(dplyr)
+library(MXM)
+library(survival)
+library(limma)
+library(glmnet)
+library(ncvreg)
+library(ggplot2)
+library(caret)
+library(Hmisc)
+library(SIS)
+source('prcox.R')
+library(MASS)
+#install.packages('ncvreg2_3.13.0.tar.gz', repos=NULL, type='source')
+library(ncvreg2)
+library(gbm)
+library(coxrobust)
+library(rbsurv)
+library(faux)
+library(pbmcapply)
+library(ggpubr)
+library(hdnom)
+library(quantreg)
+library(purrr)
+library(reshape2)
+library(data.table)
+```
+
+# functions to be used for evaluation
+
+report: all estimated values in a data frame, mean of estimated values, sum absolute diff, sum squred diff, median model size, true positive (true variables selected >50%), false positive (false variables selected >50%), estimated probability that the true model is selected
+```{r}
+summary_table_fun=function(run_result,design_params){
+my_list=sapply(run_result,function(x) x[[1]],simplify = FALSE)
+
+# Extract all unique names
+all_names <- unique(unlist(lapply(my_list, "[",1)))
+
+# Create a matrix with 0s
+matrix_data <- matrix(0, nrow = length(my_list), ncol = length(all_names), dimnames = list(names(my_list), all_names))
+
+# Fill in the matrix with values from the named vectors
+for (i in seq_along(my_list)) {
+  temp_dt=as.data.frame(my_list[[i]])
+  names_i <- temp_dt$Name
+  matrix_data[i, names_i] <- temp_dt$Value
+}
+
+# Function to fill NA with 0 and convert to numeric
+fill_na_convert_numeric <- function(x) {
+  x[is.na(x)] <- 0
+  as.numeric(x)
+}
+
+# Apply the function to each column of the matrix
+matrix_data <- apply(matrix_data, 2, fill_na_convert_numeric)
+
+# Convert the matrix to a data frame
+result_df <- as.data.frame(matrix_data)
+
+# delete zeros for final results
+final_df=round(colMeans(result_df,na.rm = TRUE),2)
+final_df=final_df[final_df!=0]
+
+# get abs diff
+# #vectors_to_subtract=data.frame(X1=1,X2=1,X3=1,X4=1,X5=1,X6=1,X30=1)
+# vectors_to_subtract=design_params
+# columns_to_subtract <- names(vectors_to_subtract)
+# col_name=colnames(result_df)
+# data=as.data.frame(matrix(0,nrow=nrow(result_df),ncol=length(columns_to_subtract)))
+# colnames(data)=columns_to_subtract
+# # Subtract vectors from corresponding columns
+# for (i in 1:length(columns_to_subtract)) {
+#    col_index <- which(colnames(result_df) == col_name[i])
+#   data[, col_index] <- abs(result_df[, col_index] - vectors_to_subtract[[col_name[i]]])
+# }
+# final_df2=colSums(data,na.rm = TRUE)
+final_df2=data.frame(matrix(nrow=nrow(design_params),ncol = ncol(design_params)))
+vectors_to_subtract=design_params
+for(i in 1:length(colnames(design_params))){
+  if(length(final_df)==0){final_df2=NA}else if(length(which(names(final_df) == colnames(design_params)[i]))==0){
+    final_df2[1,i]=abs(design_params[i])
+  }else{
+final_df2[1,i]=abs(final_df[which(names(final_df) == colnames(design_params)[i])]-design_params[i])}
+  }
+#colnames(final_df2)=colnames(design_params)
+# get squared error
+# #vectors_to_subtract=data.frame(X1=1,X2=1,X3=1,X4=1,X5=1,X6=1,X30=1)
+# vectors_to_subtract=design_params
+# columns_to_subtract <- names(vectors_to_subtract)
+# col_name=colnames(result_df)
+# data=as.data.frame(matrix(0,nrow=nrow(result_df),ncol=length(columns_to_subtract)))
+# colnames(data)=columns_to_subtract
+# # Subtract vectors from corresponding columns
+# for (i in 1:length(columns_to_subtract)) {
+#    col_index <- which(colnames(result_df) == col_name[i])
+#   data[, col_index] <- (result_df[, col_index] - vectors_to_subtract[[col_name[i]]])^2
+# }
+# final_df3=colSums(data,na.rm = TRUE)
+final_df3=data.frame(matrix(nrow=nrow(design_params),ncol = ncol(design_params)))
+vectors_to_subtract=design_params
+for(i in 1:length(colnames(design_params))){
+  if(length(final_df)==0){final_df3=NA}else if(length(which(names(final_df) == colnames(design_params)[i]))==0){
+    final_df3[1,i]=abs(design_params[i])^2
+  }else{
+final_df3[1,i]=(final_df[which(names(final_df) == colnames(design_params)[i])]-design_params[i])^2}
+  }
+#colnames(final_df3)=colnames(design_params)
+return(list(result_df,final_df,final_df2,final_df3))
+}
+
+summary_table_fun2=function(run_result,design_params){
+my_list=sapply(run_result,function(x) x[[1]],simplify = FALSE)
+
+# Extract all unique names
+all_names <- unique(unlist(lapply(my_list, names)))
+
+# Create a matrix with 0s
+matrix_data <- matrix(0, nrow = length(my_list), ncol = length(all_names), dimnames = list(names(my_list), all_names))
+
+# Fill in the matrix with values from the named vectors
+for (i in seq_along(my_list)) {
+  names_i <- names(my_list[[i]])
+  matrix_data[i, names_i] <- my_list[[i]]
+}
+
+# Function to fill NA with 0 and convert to numeric
+fill_na_convert_numeric <- function(x) {
+  x[is.na(x)] <- 0
+  as.numeric(x)
+}
+
+# Apply the function to each column of the matrix
+matrix_data <- apply(matrix_data, 2, fill_na_convert_numeric)
+
+# Convert the matrix to a data frame
+result_df <- as.data.frame(matrix_data)
+
+# delete zeros for final results
+final_df=round(colMeans(result_df,na.rm = TRUE),2)
+final_df=final_df[final_df!=0]
+# get abs diff
+# #vectors_to_subtract=data.frame(X1=1,X2=1,X3=1,X4=1,X5=1,X6=1,X30=1)
+# vectors_to_subtract=design_params
+# columns_to_subtract <- names(vectors_to_subtract)
+# col_name=colnames(result_df)
+# data=as.data.frame(matrix(0,nrow=nrow(result_df),ncol=length(columns_to_subtract)))
+# colnames(data)=columns_to_subtract
+# # Subtract vectors from corresponding columns
+# for (i in 1:length(columns_to_subtract)) {
+#    col_index <- which(colnames(result_df) == col_name[i])
+#   data[, col_index] <- abs(result_df[, col_index] - vectors_to_subtract[[col_name[i]]])
+# }
+# final_df2=colSums(data,na.rm = TRUE)
+final_df2=data.frame(matrix(nrow=nrow(design_params),ncol = ncol(design_params)))
+vectors_to_subtract=design_params
+for(i in 1:length(colnames(design_params))){
+  if(length(final_df)==0){final_df2=NA}else if(length(which(names(final_df) == colnames(design_params)[i]))==0){
+    final_df2[1,i]=abs(design_params[i])
+  }else{
+final_df2[1,i]=abs(final_df[which(names(final_df) == colnames(design_params)[i])]-design_params[i])}
+}
+#colnames(final_df2)=colnames(design_params)
+# get squared error
+# #vectors_to_subtract=data.frame(X1=1,X2=1,X3=1,X4=1,X5=1,X6=1,X30=1)
+# vectors_to_subtract=design_params
+# columns_to_subtract <- names(vectors_to_subtract)
+# col_name=colnames(result_df)
+# data=as.data.frame(matrix(0,nrow=nrow(result_df),ncol=length(columns_to_subtract)))
+# colnames(data)=columns_to_subtract
+# # Subtract vectors from corresponding columns
+# for (i in 1:length(columns_to_subtract)) {
+#    col_index <- which(colnames(result_df) == col_name[i])
+#   data[, col_index] <- (result_df[, col_index] - vectors_to_subtract[[col_name[i]]])^2
+# }
+# final_df3=colSums(data,na.rm = TRUE)
+final_df3=data.frame(matrix(nrow=nrow(design_params),ncol = ncol(design_params)))
+vectors_to_subtract=design_params
+for(i in 1:length(colnames(design_params))){
+  if(length(final_df)==0){final_df3=NA}else if(length(which(names(final_df) == colnames(design_params)[i]))==0){
+    final_df3[1,i]=abs(design_params[i])^2
+  }else{
+final_df3[1,i]=(final_df[which(names(final_df) == colnames(design_params)[i])]-design_params[i])^2}
+  }
+#colnames(final_df3)=colnames(design_params)
+
+return(list(result_df,final_df,final_df2,final_df3))
+}
+
+#calculation
+calculation_fun=possibly(function(result,given_names){
+list_of_dataframes<-list()
+for (i in 1:100){
+  list_of_dataframes[[i]]=result[[i]][[1]]
+}
+
+# Extract the first column ('characteristics') from each dataframe and skip if an error occurs
+character_columns <- lapply(list_of_dataframes, function(df) {
+  tryCatch({
+    return(df$Name)
+  }, error = function(e) {
+    return(NULL)
+  })
+})
+
+# Remove NULL elements
+character_columns <- character_columns[!sapply(character_columns, is.null)]
+
+# get model size
+model_size=sapply(character_columns,length)
+
+#get true mdoel proportion
+true_num=0
+for(i in 1:length(character_columns)){
+  vec1=sort(character_columns[[i]])
+  vec2=sort(given_names)
+  equal=all(vec1==vec2)
+  if(equal==TRUE){
+    true_num=true_num+1
+  }else{true_num=true_num}
+}
+# Combine character columns into a single vector
+all_characters <- unlist(character_columns)
+
+# Count occurrences of each character
+character_counts <- table(all_characters)
+
+#update 0315:all counts >half are determied as selected
+character_counts_vector <- names(character_counts[character_counts>50])
+# Function to calculate TP, FP, and F1 score
+calculate_tp_fp_f1 <- function(true_names, predicted_names) {
+  # Calculate TP and FP
+  tp <- sum(predicted_names %in% true_names)
+  fp <- sum(!(predicted_names %in% true_names))
+
+  # Calculate F1 score
+  precision <- tp / (tp + fp)
+  recall <- tp / length(true_names)
+
+  # Handle cases where precision + recall is 0
+  if (precision + recall == 0) {
+    return(list(tp = tp, fp = fp, f1_score = 0))
+  }
+
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+
+  return(list(tp = tp, fp = fp, f1_score = f1_score))
+}
+
+#given_names=colnames(dd)
+# Calculate TP, FP, and F1 score based on given names and character counts
+result <- calculate_tp_fp_f1(given_names, character_counts_vector)
+
+return(list(result,character_counts,model_size,true_num))}, otherwise=list(list(0,0,0),0,0,0))
+
+
+
+
+calculation_fun2=possibly(function(result,given_names){
+list_of_dataframes<-list()
+for (i in 1:100){
+  list_of_dataframes[[i]]=result[[i]][[1]]
+}
+
+# Extract the first column ('characteristics') from each dataframe and skip if an error occurs
+character_columns <- lapply(list_of_dataframes, function(df) {
+  tryCatch({
+    return(names(df))
+  }, error = function(e) {
+    return(NULL)
+  })
+})
+
+# Remove NULL elements
+character_columns <- character_columns[!sapply(character_columns, is.null)]
+
+# get model size
+model_size=sapply(character_columns,length)
+
+#get true mdoel proportion
+true_num=0
+for(i in 1:length(character_columns)){
+  vec1=sort(character_columns[[i]])
+  vec2=sort(given_names)
+  equal=all(vec1==vec2)
+  if(equal==TRUE){
+    true_num=true_num+1
+  }else{true_num=true_num}
+}
+
+# Combine character columns into a single vector
+all_characters <- unlist(character_columns)
+
+# Count occurrences of each character
+character_counts <- table(all_characters)
+
+#update 0315:all counts >half are determied as selected
+character_counts_vector <- names(character_counts[character_counts>50])
+# Function to calculate TP, FP, and F1 score
+calculate_tp_fp_f1 <- function(true_names, predicted_names) {
+  # Calculate TP and FP
+  tp <- sum(predicted_names %in% true_names)
+  fp <- sum(!(predicted_names %in% true_names))
+
+  # Calculate F1 score
+  precision <- tp / (tp + fp)
+  recall <- tp / length(true_names)
+
+  # Handle cases where precision + recall is 0
+  if (precision + recall == 0) {
+    return(list(tp = tp, fp = fp, f1_score = 0))
+  }
+
+  f1_score <- 2 * (precision * recall) / (precision + recall)
+
+  return(list(tp = tp, fp = fp, f1_score = f1_score))
+}
+
+#given_names=colnames(dd)
+# Calculate TP, FP, and F1 score based on given names and character counts
+result <- calculate_tp_fp_f1(given_names, character_counts_vector)
+
+return(list(result,character_counts,model_size,true_num))}, otherwise=list(list(0,0,0),0,0,0))
+
+```
+
+# functions for fitting the model
+```{r}
+result_cal=function(current_data2,model_name){
+  X=as.matrix(current_data2[,!colnames(current_data2)%in%c("time","status")])
+  y=Surv(current_data2$time,current_data2$status)
+  time=current_data2$time
+  status=current_data2$status
+  if(model_name=="pawph"){
+    model6 <- prcoxreg(y,X, seed=1, alpha= 0.5)
+    # PAWPH estimator
+    result=model6$betaHat_re
+    output=result[result!=0]}
+  if(model_name=="ncvreg"){
+    #ncvreg
+    method1<-ncvreg::cv.ncvsurv(X,y,gamma=3,penalty="MCP",alpha=1,nfolds=10)
+    result=method1$fit$beta[,which(method1$fit$lambda==method1$lambda.min)]
+    output=result[result!=0]
+  }
+  if(model_name=="SIS"){
+    model2=SIS(X,y,family='cox', penalty='lasso', tune='bic', varISIS='cons',seed=41,nfolds = 10,type.measure = "deviance")
+    #colnames(X)[model2$ix]
+    result=model2$coef.est
+    output=result[result!=0]
+  }
+  if(model_name=="SIS_mcp"){
+    model2=SIS(X,y,family='cox', penalty='MCP', tune='bic', varISIS='cons',seed=41,nfolds = 10,type.measure = "deviance")
+    #colnames(X)[model2$ix]
+    result=model2$coef.est
+    output=result[result!=0]
+  }
+  if(model_name=="SIS_scad"){
+    model2=SIS(X,y,family='cox', penalty='SCAD', tune='bic', varISIS='cons',seed=41,nfolds = 10,type.measure = "deviance")
+    #colnames(X)[model2$ix]
+    result=model2$coef.est
+    output=result[result!=0]
+  }
+  if(model_name=="MXM"){
+    model3<-SES(y,X,max_k=3,threshold=0.01,test="censIndCR")
+    output=rep(1,length(colnames(X)[model3@selectedVars]))
+    names(output)=colnames(X)[model3@selectedVars]
+  }
+  if(model_name=="coxrobust"){
+    PredictorVariables <- colnames(X)
+    Formula <- formula(paste("Surv(time,status) ~ ", paste(PredictorVariables, collapse=" + ")))
+    model4=coxr(Formula,data=current_data2)#the leading minor of order 2 is not positive, this cannot process this dummy variable one...
+    result=model4$coefficients#robust est
+    output=result[result!=0]
+  }
+  if(model_name=="rbsurv"){
+    model5<-rbsurv(time=time,status=status,x=as.matrix(t(current_data2[,!colnames(current_data2)%in%c("time","status")])), method="efron",n.iter=10,n.fold=10, n.seq=1) #need a row column transformation
+    output=rep(1,length(model5$gene.list))
+    names(output)=colnames(X)[as.numeric(model5$gene.list)]
+  }
+  if(model_name=="lasso"){
+    #lasso
+    fitlasso1<-hdnom::fit_lasso(X, Surv(time, status), nfolds = 10, rule = "lambda.min")
+    mat=fitlasso1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat@x
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="enet"){
+    #enet
+    fitenet1<-hdnom::fit_enet(X, Surv(time, status), nfolds = 10, rule = "lambda.min")
+    mat=fitenet1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_enet1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat@x
+    )
+    output=non_zero_values_enet1
+  }
+  if(model_name=="alasso"){
+    #alasso
+    fitlasso1<-hdnom::fit_alasso(X, Surv(time, status), nfolds = 10, rule = "lambda.min")
+    mat=fitlasso1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat@x
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="aenet"){
+    #aenet
+    fitenet1<-hdnom::fit_aenet(X, Surv(time, status), nfolds = 10, rule = "lambda.min")
+    mat=fitenet1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_enet1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat@x
+    )
+    output=non_zero_values_enet1
+  }
+  if(model_name=="scad"){
+    #alasso
+    fitlasso1<-hdnom::fit_scad(X, Surv(time, status), nfolds = 10)
+    mat=fitlasso1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat[non_zero_indices[, 1],1]
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="mnet"){
+    #aenet
+    fitenet1<-hdnom::fit_mnet(X, Surv(time, status), nfolds = 10)
+    mat=fitenet1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat[non_zero_indices[, 1],1]
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="snet"){
+    #aenet
+    fitenet1<-hdnom::fit_snet(X, Surv(time, status), nfolds = 10)
+    mat=fitenet1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat[non_zero_indices[, 1],1]
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="mcp"){
+    #aenet
+    fitenet1<-hdnom::fit_mcp(X, Surv(time, status), nfolds = 10)
+    mat=fitenet1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat[non_zero_indices[, 1],1]
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="weighted_enet"){
+    #my attempt
+    weight_vec=ifelse(time<=median(time)&status==0,0.5,ifelse(time>median(time)&status==0,1,2))
+    fit=cv.glmnet(X,y, family = "cox",nfolds = 10,alpha=0.5,weights=weight_vec)
+    want=coef(fit, s = 'lambda.min')[coef(fit, s = 'lambda.min')[,1]!= 0]
+    names=rownames(coef(fit, s = 'lambda.min'))[coef(fit, s = 'lambda.min')[,1]!= 0]
+    # output=cbind.data.frame(names,want)
+    # colnames(output)=c("Names","Value")
+    output=want
+    names(output)=names
+  }
+  if(model_name=="weighted_lasso"){
+    #my attempt
+    weight_vec=ifelse(time<=median(time)&status==0,0.5,ifelse(time>median(time)&status==0,1,2))
+    fit=cv.glmnet(X,y, family = "cox",nfolds = 10,alpha=1,weights=weight_vec)
+    want=coef(fit, s = 'lambda.min')[coef(fit, s = 'lambda.min')[,1]!= 0]
+    names=rownames(coef(fit, s = 'lambda.min'))[coef(fit, s = 'lambda.min')[,1]!= 0]
+    # output=cbind.data.frame(names,want)
+    # colnames(output)=c("Names","Value")
+    output=want
+    names(output)=names
+  }
+  if(model_name=="my"){
+    #my attempt
+    f<-crq(y~X,method="Portnoy") 
+    #coefficients(f)[-1,1]
+    # add in the weights
+    fit=cv.glmnet(X,y, family = "cox",penalty.factor = 1/abs(as.numeric(rowMeans(coefficients(f)[-1,2:3]))),alpha=1)
+    want=coef(fit, s = 'lambda.min')[coef(fit, s = 'lambda.min')[,1]!= 0]
+    names=rownames(coef(fit, s = 'lambda.min'))[coef(fit, s = 'lambda.min')[,1]!= 0]
+    output=cbind.data.frame(names,want)
+    colnames(output)=c("Names","Value")
+  }
+  if(model_name=="my2"){
+    fitlasso1<-hdnom::fit_lasso(X, Surv(time, status), nfolds = 10, rule = "lambda.min")
+    mat=fitlasso1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat@x
+    )
+    names=non_zero_values_lasso1$Name
+    X2=X[,colnames(X)%in%names]
+    #my attempt
+    f<-quantreg::crq(y~X2,method="Portnoy") 
+    want=as.numeric(coef(f)[-1,1])
+    output=cbind.data.frame(names,want)
+    colnames(output)=c("Names","Value")
+  }
+  return(list(output,table(current_data2$status)))
+}
+```
+
+
+# justification of the pawph simulated data
+
+```{r}
+sim_fun=function(seed,n,p,beta,outlier){
+  set.seed(seed)
+  #beta <- c(1, -2, 1, rep(0, p-3))
+  ## generate x matrix
+  mu.x <- rep(0, p)
+  Sigma.x <- matrix(rep(0.1,p*p),p,p)+diag(0.9,p)
+  X <- mvrnorm(n, mu=mu.x, Sigma = Sigma.x)
+  if(outlier==TRUE){
+  ## generate failure time with long-survival outliers
+  num.out <- n*0.05
+  gamma <- c(rep(0, n-num.out),  rep(-5,ceiling(num.out)))
+  k.shape <- 1
+  h0 <- 2
+  r.u <- runif(n)
+  ftime <- (-log(r.u)/(h0^k.shape*exp(X %*% beta + gamma )))^(1/k.shape)#exp baseline hazard
+  delta <- c(rep(0, n*0.2), rep(1,n*0.8 ))
+  y <- Surv(ftime, delta) 
+  colnames(X)=paste0("X", 1:p, "")
+  time=ftime
+  status=delta
+  current_data2=cbind.data.frame(time,status,X)}else{
+  
+  k.shape <- 1
+  h0 <- 2
+  r.u <- runif(n)
+  ftime <- (-log(r.u)/(h0^k.shape*exp(X %*% beta)))^(1/k.shape)
+  delta <- c(rep(0, n*0.2), rep(1,n*0.8 ))
+  y <- Surv(ftime, delta) 
+  colnames(X)=paste0("X", 1:p, "")
+  time=ftime
+  status=delta
+  current_data2=cbind.data.frame(time,status,X)
+  }
+  return(current_data2)
+}
+
+sim_fun_detailed=function(seed,n,p,beta,outlier,censoring_rate,outlier_value, shape,h0){
+  set.seed(seed)
+  #beta <- c(1, -2, 1, rep(0, p-3))
+  ## generate x matrix
+  mu.x <- rep(0, p)
+  Sigma.x <- matrix(rep(0.1,p*p),p,p)+diag(0.9,p)
+  X <- mvrnorm(n, mu=mu.x, Sigma = Sigma.x)
+  if(outlier==TRUE){
+  ## generate failure time with long-survival outliers
+  num.out <- n*0.05
+  gamma <- c(rep(0, n-num.out),  rep(outlier_value,ceiling(num.out)))
+  k.shape <- shape
+  h0 <- h0
+  r.u <- runif(n)
+  ftime <- (-log(r.u)/(h0^k.shape*exp(X %*% beta + gamma )))^(1/k.shape)#exp baseline hazard
+  delta <- c(rep(0, n*censoring_rate), rep(1,n*(1-censoring_rate) ))
+  y <- Surv(ftime, delta) 
+  colnames(X)=paste0("X", 1:p, "")
+  time=ftime
+  status=delta
+  current_data2=cbind.data.frame(time,status,X)}else{
+  
+  k.shape <- 1
+  h0 <- 2
+  r.u <- runif(n)
+  ftime <- (-log(r.u)/(h0^k.shape*exp(X %*% beta)))^(1/k.shape)
+  delta <- c(rep(0, n*0.2), rep(1,n*0.8 ))
+  y <- Surv(ftime, delta) 
+  colnames(X)=paste0("X", 1:p, "")
+  time=ftime
+  status=delta
+  current_data2=cbind.data.frame(time,status,X)
+  }
+  return(current_data2)
+}
+```
+
+```{r eval=FALSE}
+run_fun=function(iter, n,p,beta,outlier,model_name){
+  current_data2=sim_fun(seed=iter,n=n,p=p,outlier =outlier,beta=beta)
+  result_cal_result=result_cal(current_data2,model_name = model_name)
+  return(result_cal_result)
+}
+
+
+result1=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="lasso",outlier=FALSE, mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="enet",outlier=FALSE, mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="alasso",outlier=FALSE, mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="aenet",outlier=FALSE, mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="mcp",outlier=FALSE, mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="scad",outlier=FALSE, mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="mnet",outlier=FALSE, mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="snet",outlier=FALSE, mc.cores = 15)
+source("prcox.R")
+result9=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="pawph", outlier=FALSE,mc.cores = 15)
+source("prcox_my.R")
+result10=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="pawph", outlier=FALSE,mc.cores = 15)
+source("prcox_my2.R")
+result11=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)), model_name="pawph",outlier=FALSE,mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="SIS",outlier=FALSE,mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)), model_name="weighted_lasso", outlier=FALSE,mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100,run_fun, n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="weighted_enet", outlier=FALSE,mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100,run_fun, n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="my",outlier=FALSE,mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="pawphsimdata_lowdim_0320.RData")
+
+# # testing my fun: all work
+# summary_table_fun(result1,design_params = data.frame(X1=1,X2=2,X3=-1))
+# summary_table_fun(result3,design_params = data.frame(X1=1,X2=2,X3=-1))
+# summary_table_fun2(result9,design_params = data.frame(X1=1,X2=2,X3=-1))
+# calculation_fun(result1,given_names=c("X1","X2","X3"))
+# calculation_fun(result4,given_names=c("X1","X2","X3"))
+# calculation_fun2(result10,given_names=c("X1","X2","X3"))
+
+result1=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="lasso",outlier=TRUE, mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="enet",outlier=TRUE, mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="alasso",outlier=TRUE, mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="aenet",outlier=TRUE, mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="mcp",outlier=TRUE, mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="scad",outlier=TRUE, mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="mnet",outlier=TRUE, mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="snet",outlier=TRUE, mc.cores = 15)
+source("prcox.R")
+result9=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="pawph", outlier=TRUE,mc.cores = 15)
+source("prcox_my.R")
+result10=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="pawph", outlier=TRUE,mc.cores = 15)
+source("prcox_my2.R")
+result11=pbmcapply::pbmclapply(1:100,run_fun, n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="pawph",outlier=TRUE,mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="SIS",outlier=TRUE,mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100,run_fun, n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)),model_name="weighted_lasso", outlier=TRUE,mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)), model_name="weighted_enet", outlier=TRUE,mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=30,beta=c(1,2,-1, rep(0, 30-3)), model_name="my",outlier=TRUE,mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="pawphsimdata_lowdim_outlier_0320.RData")
+
+
+result1=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="lasso",outlier=FALSE, mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="enet",outlier=FALSE, mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="alasso",outlier=FALSE, mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="aenet",outlier=FALSE, mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="mcp",outlier=FALSE, mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="scad",outlier=FALSE, mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="mnet",outlier=FALSE, mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="snet",outlier=FALSE, mc.cores = 15)
+source("prcox.R")
+result9=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="pawph", outlier=FALSE,mc.cores = 15)
+source("prcox_my.R")
+result10=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="pawph", outlier=FALSE,mc.cores = 15)
+source("prcox_my2.R")
+result11=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)), model_name="pawph",outlier=FALSE,mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="SIS",outlier=FALSE,mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)), model_name="weighted_lasso", outlier=FALSE,mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100,run_fun, n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="weighted_enet", outlier=FALSE,mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100,run_fun, n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="my",outlier=FALSE,mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="pawphsimdata_highdim_0320.RData")
+
+
+result1=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="lasso",outlier=TRUE, mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="enet",outlier=TRUE, mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="alasso",outlier=TRUE, mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="aenet",outlier=TRUE, mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="mcp",outlier=TRUE, mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="scad",outlier=TRUE, mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="mnet",outlier=TRUE, mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="snet",outlier=TRUE, mc.cores = 15)
+source("prcox.R")
+result9=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="pawph", outlier=TRUE,mc.cores = 15)
+source("prcox_my.R")
+result10=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="pawph", outlier=TRUE,mc.cores = 15)
+source("prcox_my2.R")
+result11=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)), model_name="pawph",outlier=TRUE,mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="SIS",outlier=TRUE,mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100,run_fun,n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)), model_name="weighted_lasso", outlier=TRUE,mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100,run_fun, n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="weighted_enet", outlier=TRUE,mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100,run_fun, n=300,p=1000,beta=c(1,2,-1, rep(0, 1000-3)),model_name="my",outlier=TRUE,mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="pawphsimdata_highdim_outlier_0320.RData")
+```
+
+```{r}
+get_figures_each=function(beta, colnames_dt, given_names, scenario1,designed_params,name)
+{
+  load(scenario1)
+  all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun(result3,given_names),calculation_fun(result4,given_names),
+                    calculation_fun(result5,given_names),calculation_fun(result6,given_names),
+                    calculation_fun(result7,given_names),calculation_fun(result8,given_names),
+                    calculation_fun2(result9,given_names),calculation_fun2(result10,given_names),
+                    calculation_fun2(result11,given_names),calculation_fun2(result12,given_names),
+                    calculation_fun(result13,given_names),calculation_fun(result14,given_names),calculation_fun(result15,given_names))
+  final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+  highdim_param1_f1=final_cal_table$V3
+  highdim_param1_tp=final_cal_table$V1
+  highdim_param1_fp=final_cal_table$V2
+  
+  highdim_param1_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+  highdim_param1_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+  return_table=cbind.data.frame(highdim_param1_tp,highdim_param1_fp,highdim_param1_f1,highdim_param1_correctprob,highdim_param1_medianmodelsize)
+  colnames(return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  return_table$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun(result3,designed_params),summary_table_fun(result4,designed_params),summary_table_fun(result5,designed_params),summary_table_fun(result6,designed_params),summary_table_fun(result7,designed_params),summary_table_fun(result8,designed_params),summary_table_fun2(result9,designed_params),summary_table_fun2(result10,designed_params),summary_table_fun2(result11,designed_params),summary_table_fun2(result12,designed_params),summary_table_fun(result13,designed_params),summary_table_fun(result14,designed_params),summary_table_fun(result15,designed_params))
+    mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+      mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    }
+    mean_est$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+    highdim_param1=sweep(mean_est[,1:3],2,beta)
+     highdim_param1$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+    sum_abs=data.frame(matrix(NA,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+    sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+    }
+     sum_abs$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+    mse=data.frame(matrix(NA,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+     mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+    }
+    mse$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+  ########
+  
+  gg_heatmap_data <- melt(highdim_param1, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(-3,3),colours = c("#2166AC", "#67A9CF" ,"#D1E5F0", "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p1=ggheatmap
+ 
+   gg_heatmap_data <- melt(sum_abs, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,max(sum_abs[,1:3],na.rm = TRUE)),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p2=ggheatmap
+  
+   gg_heatmap_data <- melt(mse, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,max(mse[,1:3],na.rm = TRUE)),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p3=ggheatmap
+
+  finalgg=ggarrange(p1,p2,p3,nrow=3,ncol = 1)
+finalgg
+#ggsave(plot=finalgg,filename=paste(name,"heatmap.pdf",sep="_"),height = 10,width = 10)
+
+ return(list(return_table,mean_est,sum_abs,mse))
+}
+
+#update 20240609 with less methods
+get_figures_each_less=function(beta, colnames_dt, given_names, scenario1,designed_params,name)
+{
+  load(scenario1)
+  all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun(result3,given_names),calculation_fun(result4,given_names),
+                    calculation_fun(result5,given_names),calculation_fun(result6,given_names),
+                    calculation_fun(result7,given_names),calculation_fun(result8,given_names),
+                    calculation_fun2(result9,given_names),calculation_fun2(result10,given_names),
+                    calculation_fun2(result11,given_names),calculation_fun2(result12,given_names))
+  final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+  highdim_param1_f1=final_cal_table$V3
+  highdim_param1_tp=final_cal_table$V1
+  highdim_param1_fp=final_cal_table$V2
+  
+  highdim_param1_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+  highdim_param1_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+  return_table=cbind.data.frame(highdim_param1_tp,highdim_param1_fp,highdim_param1_f1,highdim_param1_correctprob,highdim_param1_medianmodelsize)
+  colnames(return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  return_table$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun(result3,designed_params),summary_table_fun(result4,designed_params),summary_table_fun(result5,designed_params),summary_table_fun(result6,designed_params),summary_table_fun(result7,designed_params),summary_table_fun(result8,designed_params),summary_table_fun2(result9,designed_params),summary_table_fun2(result10,designed_params),summary_table_fun2(result11,designed_params),summary_table_fun2(result12,designed_params))
+    mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+      mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    }
+    mean_est$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+    highdim_param1=sweep(mean_est[,1:3],2,beta)
+     highdim_param1$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+    sum_abs=data.frame(matrix(NA,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+    sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+    }
+     sum_abs$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+    mse=data.frame(matrix(NA,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+     mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+    }
+    mse$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+  ########
+  
+  gg_heatmap_data <- melt(highdim_param1, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(-3,3),colours = c("#2166AC", "#67A9CF" ,"#D1E5F0", "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p1=ggheatmap
+ 
+   gg_heatmap_data <- melt(sum_abs, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,max(sum_abs[,1:3],na.rm = TRUE)),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p2=ggheatmap
+  
+   gg_heatmap_data <- melt(mse, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,max(mse[,1:3],na.rm = TRUE)),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p3=ggheatmap
+
+  finalgg=ggarrange(p1,p2,p3,nrow=3,ncol = 1)
+finalgg
+ggsave(plot=finalgg,filename=paste(name,"heatmap_less.pdf",sep="_"),height = 10,width = 10)
+
+ return(list(return_table,mean_est,sum_abs,mse))
+}
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each(beta=c(1,2,-1), colnames_dt=c("X1","X2","X3"), given_names=c("X1","X2","X3"), scenario1="pawphsimdata_lowdim_0320.RData",designed_params=data.frame(X1=1,X2=2,X3=-1),name = "pawphlowdim")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each(beta=c(1,2,-1), colnames_dt=c("X1","X2","X3"), given_names=c("X1","X2","X3"), scenario1="pawphsimdata_lowdim_outlier_0320.RData",designed_params=data.frame(X1=1,X2=2,X3=-1),name = "pawphlowdimoutlier")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_less(beta=c(1,2,-1), colnames_dt=c("X1","X2","X3"), given_names=c("X1","X2","X3"), scenario1="pawphsimdata_lowdim_0320.RData",designed_params=data.frame(X1=1,X2=2,X3=-1),name = "pawphlowdim")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_less(beta=c(1,2,-1), colnames_dt=c("X1","X2","X3"), given_names=c("X1","X2","X3"), scenario1="pawphsimdata_lowdim_outlier_0320.RData",designed_params=data.frame(X1=1,X2=2,X3=-1),name = "pawphlowdimoutlier")
+```
+
+
+```{r fig.height=6,fig.width=8}
+get_figures_each(beta=c(1,2,-1), colnames_dt=c("X1","X2","X3"), given_names=c("X1","X2","X3"), scenario1="pawphsimdata_highdim_0320.RData",designed_params=data.frame(X1=1,X2=2,X3=-1),name = "pawphhighdim")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each(beta=c(1,2,-1), colnames_dt=c("X1","X2","X3"), given_names=c("X1","X2","X3"), scenario1="pawphsimdata_highdim_outlier_0320.RData",designed_params=data.frame(X1=1,X2=2,X3=-1),name = "pawphhighdimoutlier")
+```
+
+
+# justification of the sis simulated data
+```{r}
+sis_sim_data_case1=function(seed,n,p,beta){
+  set.seed(seed)
+  X <- mvrnorm(n, mu=rep(0,p),Sigma = diag(p))
+  colnames(X)=paste0("X", 1:p, "")
+      k.shape <- 1
+      h0 <- 0.1
+      r.u <- runif(n)
+      ftime <- (-log(r.u)/(h0^k.shape*exp(X %*% beta)))^(1/k.shape)
+      ctime=rpois(n,10)
+      time <- pmin(ftime, ctime)
+      status <- as.numeric(ftime <= ctime)
+      current_data2=cbind.data.frame(time,status,X)
+      return(current_data2)
+}
+
+sis_sim_data_case1_attempt=sis_sim_data_case1(1,n=300,p=400,beta=c(-1.6328,1.3988,-1.6497,1.6353,-1.4209,1.7022,rep(0,400-6)))
+table(sis_sim_data_case1_attempt$status)#censoring rate 46%
+summary(sis_sim_data_case1_attempt$time)
+hist(sis_sim_data_case1_attempt$time)
+
+
+sis_sim_data_case2=function(seed,n,p,beta){
+  set.seed(seed)
+  cov_matrix <- matrix(0.5, nrow = p, ncol = p)
+  diag(cov_matrix) <- 1
+  X <- mvrnorm(n, mu=rep(0,p),Sigma = cov_matrix)
+  colnames(X)=paste0("X", 1:p, "")
+      k.shape <- 1
+      h0 <- 0.1
+      r.u <- runif(n)
+      ftime <- (-log(r.u)/(h0^k.shape*exp(X %*% beta)))^(1/k.shape)
+      ctime=rpois(n,10)
+      time <- pmin(ftime, ctime)
+      status <- as.numeric(ftime <= ctime)
+      current_data2=cbind.data.frame(time,status,X)
+      return(current_data2)
+}
+
+sis_sim_data_case2_attempt=sis_sim_data_case2(1,n=300,p=400,beta=c(-1.6328,1.3988,-1.6497,1.6353,-1.4209,1.7022,rep(0,400-6)))
+table(sis_sim_data_case2_attempt$status)#censoring rate 46%
+summary(sis_sim_data_case2_attempt$time)
+hist(sis_sim_data_case2_attempt$time)
+
+
+sis_sim_data_case3=function(seed,n,p,beta){
+  set.seed(seed)
+corr_matrix <- matrix(1/2, nrow = p, ncol = p)
+diag(corr_matrix) <- 1
+corr_matrix[, 4] <- 1/sqrt(2)
+corr_matrix[4, ] <- 1/sqrt(2)
+corr_matrix <- nearPD(corr_matrix)$mat
+
+  X <- mvrnorm(n, mu=rep(0,p),Sigma = corr_matrix)
+  colnames(X)=paste0("X", 1:p, "")
+      k.shape <- 1
+      h0 <- 0.1
+      r.u <- runif(n)
+      ftime <- (-log(r.u)/(h0^k.shape*exp(X %*% beta)))^(1/k.shape)
+      ctime=rpois(n,10)
+      time <- pmin(ftime, ctime)
+      status <- as.numeric(ftime <= ctime)
+      current_data2=cbind.data.frame(time,status,X)
+      return(current_data2)
+}
+
+sis_sim_data_case3_attempt=sis_sim_data_case3(1,n=300,p=400,beta=c(4,4,4,-6*sqrt(2),rep(0,400-4)))
+table(sis_sim_data_case3_attempt$status)#censoring rate 46%
+summary(sis_sim_data_case3_attempt$time)
+hist(sis_sim_data_case3_attempt$time)
+
+
+sis_sim_data_case4=function(seed,n,p,beta){
+  set.seed(seed)
+corr_matrix <- matrix(1/2, nrow = p, ncol = p)
+diag(corr_matrix) <- 1
+corr_matrix[, 4] <- 1/sqrt(2)
+corr_matrix[4, ] <- 1/sqrt(2)
+corr_matrix[, 5] <- 0
+corr_matrix[5, ] <- 0
+corr_matrix <- nearPD(corr_matrix)$mat
+
+  X <- mvrnorm(n, mu=rep(0,p),Sigma = corr_matrix)
+  colnames(X)=paste0("X", 1:p, "")
+      k.shape <- 1
+      h0 <- 0.1
+      r.u <- runif(n)
+      ftime <- (-log(r.u)/(h0^k.shape*exp(X %*% beta)))^(1/k.shape)
+      ctime=rpois(n,10)
+      time <- pmin(ftime, ctime)
+      status <- as.numeric(ftime <= ctime)
+      current_data2=cbind.data.frame(time,status,X)
+      return(current_data2)
+}
+
+sis_sim_data_case4_attempt=sis_sim_data_case4(1,n=300,p=400,beta=c(4,4,4,-6*sqrt(2),4/3,rep(0,400-5)))
+table(sis_sim_data_case4_attempt$status)#censoring rate 46%
+summary(sis_sim_data_case4_attempt$time)
+hist(sis_sim_data_case4_attempt$time)
+
+sis_sim_data_case5_attempt=sis_sim_data_case2(1,n=400,p=1000,beta=c(-1.5140,1.2799,-1.5307,1.5164,-1.3020,1.5833,rep(0,1000-6)))
+table(sis_sim_data_case5_attempt$status)#censoring rate 45%
+summary(sis_sim_data_case5_attempt$time)
+hist(sis_sim_data_case5_attempt$time)
+
+sis_sim_data_case6_attempt=sis_sim_data_case4(1,n=400,p=1000,beta=c(4,4,4,-6*sqrt(2),4/3,rep(0,1000-5)))
+table(sis_sim_data_case6_attempt$status)#censoring rate 45%
+summary(sis_sim_data_case6_attempt$time)
+hist(sis_sim_data_case6_attempt$time)
+```
+
+```{r eval=FALSE}
+run_fun3=function(iter,model_name){
+  current_data2=sis_sim_data_case1(iter,n=300,p=400,beta=c(-1.6328,1.3988,-1.6497,1.6353,-1.4209,1.7022,rep(0,400-6)))
+  result_cal_result=result_cal(current_data2,model_name)
+  return(result_cal_result)
+}
+run_fun4=function(iter,model_name){
+  current_data2=sis_sim_data_case2(iter,n=300,p=400,beta=c(-1.6328,1.3988,-1.6497,1.6353,-1.4209,1.7022,rep(0,400-6)))
+  result_cal_result=result_cal(current_data2,model_name)
+  return(result_cal_result)
+}
+run_fun5=function(iter,model_name){
+  current_data2=sis_sim_data_case3(iter,n=300,p=400,beta=c(4,4,4,-6*sqrt(2),rep(0,400-4)))
+  result_cal_result=result_cal(current_data2,model_name)
+  return(result_cal_result)
+}
+run_fun6=function(iter,model_name){
+  current_data2=sis_sim_data_case4(iter,n=300,p=400,beta=c(4,4,4,-6*sqrt(2),4/3,rep(0,400-5)))
+  result_cal_result=result_cal(current_data2,model_name)
+  return(result_cal_result)
+}
+run_fun7=function(iter,model_name){
+  current_data2=sis_sim_data_case2(iter,n=400,p=1000,beta=c(-1.5140,1.2799,-1.5307,1.5164,-1.3020,1.5833,rep(0,1000-6)))
+  result_cal_result=result_cal(current_data2,model_name)
+  return(result_cal_result)
+}
+run_fun8=function(iter,model_name){
+  current_data2=sis_sim_data_case4(iter,n=400,p=1000,beta=c(4,4,4,-6*sqrt(2),4/3,rep(0,1000-5)))
+  result_cal_result=result_cal(current_data2,model_name)
+  return(result_cal_result)
+}
+
+
+result1=pbmcapply::pbmclapply(1:100, run_fun3,model_name="lasso",mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun3,model_name="enet",mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun3,model_name="alasso", mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun3,model_name="aenet",mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun3,model_name="mcp", mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun3,model_name="scad",mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun3,model_name="mnet", mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun3,model_name="snet",mc.cores = 15)
+result9=pbmcapply::pbmclapply(1:100, run_fun3,model_name="pawph",mc.cores = 15)
+result10=pbmcapply::pbmclapply(1:100, run_fun3,model_name="pawph_mcp",mc.cores = 15)
+result11=pbmcapply::pbmclapply(1:100, run_fun3,model_name="pawph_scad",mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100, run_fun3,model_name="SIS",mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100, run_fun3,model_name="weighted_lasso",mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100, run_fun3,model_name="weighted_enet",mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100, run_fun3,model_name="my",mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="sissimdata1_0320.RData")
+
+
+result1=pbmcapply::pbmclapply(1:100, run_fun4,model_name="lasso",mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun4,model_name="enet",mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun4,model_name="alasso", mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun4,model_name="aenet",mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun4,model_name="mcp", mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun4,model_name="scad",mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun4,model_name="mnet", mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun4,model_name="snet",mc.cores = 15)
+result9=pbmcapply::pbmclapply(1:100, run_fun4,model_name="pawph",mc.cores = 15)
+result10=pbmcapply::pbmclapply(1:100, run_fun4,model_name="pawph_mcp",mc.cores = 15)
+result11=pbmcapply::pbmclapply(1:100, run_fun4,model_name="pawph_scad",mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100, run_fun4,model_name="SIS",mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100, run_fun4,model_name="weighted_lasso",mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100, run_fun4,model_name="weighted_enet",mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100, run_fun4,model_name="my",mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="sissimdata2_0320.RData")
+
+result1=pbmcapply::pbmclapply(1:100, run_fun5,model_name="lasso",mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun5,model_name="enet",mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun5,model_name="alasso", mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun5,model_name="aenet",mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun5,model_name="mcp", mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun5,model_name="scad",mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun5,model_name="mnet", mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun5,model_name="snet",mc.cores = 15)
+result9=pbmcapply::pbmclapply(1:100, run_fun5,model_name="pawph",mc.cores = 15)
+result10=pbmcapply::pbmclapply(1:100, run_fun5,model_name="pawph_mcp",mc.cores = 15)
+result11=pbmcapply::pbmclapply(1:100, run_fun5,model_name="pawph_scad",mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100, run_fun5,model_name="SIS",mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100, run_fun5,model_name="weighted_lasso",mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100, run_fun5,model_name="weighted_enet",mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100, run_fun5,model_name="my",mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="sissimdata3_0320.RData")
+
+result1=pbmcapply::pbmclapply(1:100, run_fun6,model_name="lasso",mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun6,model_name="enet",mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun6,model_name="alasso", mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun6,model_name="aenet",mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun6,model_name="mcp", mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun6,model_name="scad",mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun6,model_name="mnet", mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun6,model_name="snet",mc.cores = 15)
+result9=pbmcapply::pbmclapply(1:100, run_fun6,model_name="pawph",mc.cores = 15)
+result10=pbmcapply::pbmclapply(1:100, run_fun6,model_name="pawph_mcp",mc.cores = 15)
+result11=pbmcapply::pbmclapply(1:100, run_fun6,model_name="pawph_scad",mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100, run_fun6,model_name="SIS",mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100, run_fun6,model_name="weighted_lasso",mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100, run_fun6,model_name="weighted_enet",mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100, run_fun6,model_name="my",mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="sissimdata4_0320.RData")
+
+
+result1=pbmcapply::pbmclapply(1:100, run_fun7,model_name="lasso",mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun7,model_name="enet",mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun7,model_name="alasso", mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun7,model_name="aenet",mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun7,model_name="mcp", mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun7,model_name="scad",mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun7,model_name="mnet", mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun7,model_name="snet",mc.cores = 15)
+result9=pbmcapply::pbmclapply(1:100, run_fun7,model_name="pawph",mc.cores = 15)
+result10=pbmcapply::pbmclapply(1:100, run_fun7,model_name="pawph_mcp",mc.cores = 15)
+result11=pbmcapply::pbmclapply(1:100, run_fun7,model_name="pawph_scad",mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100, run_fun7,model_name="SIS",mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100, run_fun7,model_name="weighted_lasso",mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100, run_fun7,model_name="weighted_enet",mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100, run_fun7,model_name="my",mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="sissimdata5_0320.RData")
+
+result1=pbmcapply::pbmclapply(1:100, run_fun8,model_name="lasso",mc.cores = 15)
+result2=pbmcapply::pbmclapply(1:100, run_fun8,model_name="enet",mc.cores = 15)
+result3=pbmcapply::pbmclapply(1:100, run_fun8,model_name="alasso", mc.cores = 15)
+result4=pbmcapply::pbmclapply(1:100, run_fun8,model_name="aenet",mc.cores = 15)
+result5=pbmcapply::pbmclapply(1:100, run_fun8,model_name="mcp", mc.cores = 15)
+result6=pbmcapply::pbmclapply(1:100, run_fun8,model_name="scad",mc.cores = 15)
+result7=pbmcapply::pbmclapply(1:100, run_fun8,model_name="mnet", mc.cores = 15)
+result8=pbmcapply::pbmclapply(1:100, run_fun8,model_name="snet",mc.cores = 15)
+result9=pbmcapply::pbmclapply(1:100, run_fun8,model_name="pawph",mc.cores = 15)
+result10=pbmcapply::pbmclapply(1:100, run_fun8,model_name="pawph_mcp",mc.cores = 15)
+result11=pbmcapply::pbmclapply(1:100, run_fun8,model_name="pawph_scad",mc.cores = 15)
+result12=pbmcapply::pbmclapply(1:100, run_fun8,model_name="SIS",mc.cores = 15)
+result13=pbmcapply::pbmclapply(1:100, run_fun8,model_name="weighted_lasso",mc.cores = 15)
+result14=pbmcapply::pbmclapply(1:100, run_fun8,model_name="weighted_enet",mc.cores = 15)
+result15=pbmcapply::pbmclapply(1:100, run_fun8,model_name="my",mc.cores = 15)
+save(result1,result2,result3,result4,result5,result6,result7,result8,result9,result10,result11,result12,result13,result14,result15,file="sissimdata6_0320.RData")
+
+
+
+```
+
+new figure generation func
+```{r}
+
+get_figures_each_sis=function(beta, colnames_dt, given_names, scenario1,designed_params,name)
+{
+  load(scenario1)
+  all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun(result3,given_names),calculation_fun(result4,given_names),
+                    calculation_fun(result5,given_names),calculation_fun(result6,given_names),
+                    calculation_fun(result7,given_names),calculation_fun(result8,given_names),
+                    calculation_fun2(result9,given_names),calculation_fun2(result10,given_names),
+                    calculation_fun2(result11,given_names),calculation_fun2(result12,given_names),
+                    calculation_fun2(result13,given_names),calculation_fun2(result14,given_names),calculation_fun2(result15,given_names))
+  final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+  highdim_param1_f1=final_cal_table$V3
+  highdim_param1_tp=final_cal_table$V1
+  highdim_param1_fp=final_cal_table$V2
+  
+  highdim_param1_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+  highdim_param1_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+  return_table=cbind.data.frame(highdim_param1_tp,highdim_param1_fp,highdim_param1_f1,highdim_param1_correctprob,highdim_param1_medianmodelsize)
+  colnames(return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  return_table$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun(result3,designed_params),summary_table_fun(result4,designed_params),summary_table_fun(result5,designed_params),summary_table_fun(result6,designed_params),summary_table_fun(result7,designed_params),summary_table_fun(result8,designed_params),summary_table_fun2(result9,designed_params),summary_table_fun2(result10,designed_params),summary_table_fun2(result11,designed_params),summary_table_fun2(result12,designed_params),summary_table_fun2(result13,designed_params),summary_table_fun2(result14,designed_params),summary_table_fun2(result15,designed_params))
+    mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+      mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    }
+    mean_est$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+    highdim_param1=sweep(mean_est[,1:length(beta)],2,beta)
+     highdim_param1$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+    sum_abs=data.frame(matrix(NA,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+    sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+    }
+     sum_abs$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+    mse=data.frame(matrix(NA,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+     mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+    }
+    mse$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS","weighted_lasso","weighted_enet","quantile_lasso"))
+  ########
+  
+  gg_heatmap_data <- melt(highdim_param1, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(-3,3),colours = c("#2166AC", "#67A9CF" ,"#D1E5F0", "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p1=ggheatmap
+ 
+   gg_heatmap_data <- melt(sum_abs, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,max(sum_abs[,1:length(beta)],na.rm = TRUE)),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p2=ggheatmap
+  
+   gg_heatmap_data <- melt(mse, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,max(mse[,1:length(beta)],na.rm = TRUE)),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p3=ggheatmap
+
+  finalgg=ggarrange(p1,p2,p3,nrow=3,ncol = 1)
+finalgg
+#ggsave(plot=finalgg,filename=paste(name,"heatmap.pdf",sep="_"),height = 10,width = 10)
+
+ return(list(return_table,mean_est,sum_abs,mse))
+}
+
+
+get_figures_each_sis_less=function(beta, colnames_dt, given_names, scenario1,designed_params,name)
+{
+  load(scenario1)
+  all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun(result3,given_names),calculation_fun(result4,given_names),
+                    calculation_fun(result5,given_names),calculation_fun(result6,given_names),
+                    calculation_fun(result7,given_names),calculation_fun(result8,given_names),
+                    calculation_fun2(result9,given_names),calculation_fun2(result10,given_names),
+                    calculation_fun2(result11,given_names),calculation_fun2(result12,given_names))
+  final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+  highdim_param1_f1=final_cal_table$V3
+  highdim_param1_tp=final_cal_table$V1
+  highdim_param1_fp=final_cal_table$V2
+  
+  highdim_param1_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+  highdim_param1_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+  return_table=cbind.data.frame(highdim_param1_tp,highdim_param1_fp,highdim_param1_f1,highdim_param1_correctprob,highdim_param1_medianmodelsize)
+  colnames(return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  return_table$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun(result3,designed_params),summary_table_fun(result4,designed_params),summary_table_fun(result5,designed_params),summary_table_fun(result6,designed_params),summary_table_fun(result7,designed_params),summary_table_fun(result8,designed_params),summary_table_fun2(result9,designed_params),summary_table_fun2(result10,designed_params),summary_table_fun2(result11,designed_params),summary_table_fun2(result12,designed_params))
+    mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+      mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    }
+    mean_est$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+    highdim_param1=sweep(mean_est[,1:length(beta)],2,beta)
+     highdim_param1$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+    sum_abs=data.frame(matrix(NA,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+    sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+    }
+     sum_abs$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+    mse=data.frame(matrix(NA,nrow = length(all_list2),ncol = length(beta)))
+    for(i in 1:length(all_list2)){
+     mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+    }
+    mse$method=factor(c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"),levels = c("lasso","enet","alasso","aenet","mcp","scad","ment","snet","pawph","phawph_mcp","pawph_scad","SIS"))
+  ########
+  
+  gg_heatmap_data <- melt(highdim_param1, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(-3,3),colours = c("#2166AC", "#67A9CF" ,"#D1E5F0", "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p1=ggheatmap
+ 
+   gg_heatmap_data <- melt(sum_abs, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,max(sum_abs[,1:length(beta)],na.rm = TRUE)),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p2=ggheatmap
+  
+   gg_heatmap_data <- melt(mse, id.vars = c("method"), variable.name = "variables")
+  ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+    geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,max(mse[,1:length(beta)],na.rm = TRUE)),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params - true params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+    geom_text(aes(label = round(value,2)), color = "black", size = 4)
+  p3=ggheatmap
+
+  finalgg=ggarrange(p1,p2,p3,nrow=3,ncol = 1)
+finalgg
+ggsave(plot=finalgg,filename=paste(name,"heatmap_less.pdf",sep="_"),height = 10,width = 10)
+
+ return(list(return_table,mean_est,sum_abs,mse))
+}
+
+```
+
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_sis(beta=c(-1.6328,1.3988,-1.6497,1.6353,-1.4209,1.7022), colnames_dt=c("X1","X2","X3","X4","X5","X6"), given_names=c("X1","X2","X3","X4","X5","X6"), scenario1="sissimdata1_0320.RData",designed_params=data.frame(X1=-1.6328,X2=1.3988,X3=-1.6497,X4=1.6353,X5=-1.4209,X6=1.7022),name = "sis_scenario1")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_sis(beta=c(-1.6328,1.3988,-1.6497,1.6353,-1.4209,1.7022), colnames_dt=c("X1","X2","X3","X4","X5","X6"), given_names=c("X1","X2","X3","X4","X5","X6"), scenario1="sissimdata2_0320.RData",designed_params=data.frame(X1=-1.6328,X2=1.3988,X3=-1.6497,X4=1.6353,X5=-1.4209,X6=1.7022),name = "sis_scenario2")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_sis_less(beta=c(-1.6328,1.3988,-1.6497,1.6353,-1.4209,1.7022), colnames_dt=c("X1","X2","X3","X4","X5","X6"), given_names=c("X1","X2","X3","X4","X5","X6"), scenario1="sissimdata1_0320.RData",designed_params=data.frame(X1=-1.6328,X2=1.3988,X3=-1.6497,X4=1.6353,X5=-1.4209,X6=1.7022),name = "sis_scenario1")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_sis_less(beta=c(4,4,4,-6*sqrt(2)), colnames_dt=c("X1","X2","X3","X4"), given_names=c("X1","X2","X3","X4"), scenario1="sissimdata3_0320.RData",designed_params=data.frame(X1=4,X2=4,X3=4,X4=-6*sqrt(2)),name = "sis_scenario3")
+```
+
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_sis(beta=c(4,4,4,-6*sqrt(2)), colnames_dt=c("X1","X2","X3","X4"), given_names=c("X1","X2","X3","X4"), scenario1="sissimdata3_0320.RData",designed_params=data.frame(X1=4,X2=4,X3=4,X4=-6*sqrt(2)),name = "sis_scenario3")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_sis(beta=c(4,4,4,-6*sqrt(2),4/3), colnames_dt=c("X1","X2","X3","X4","X5"), given_names=c("X1","X2","X3","X4","X5"), scenario1="sissimdata4_0320.RData",designed_params=data.frame(X1=4,X2=4,X3=4,X4=-6*sqrt(2),X5=4/3),name = "sis_scenario4")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_sis(beta=c(-1.5140,1.2799,-1.5307,1.5164,-1.3020,1.5833), colnames_dt=c("X1","X2","X3","X4","X5","X6"), given_names=c("X1","X2","X3","X4","X5","X6"), scenario1="sissimdata5_0320.RData",designed_params=data.frame(X1=-1.5140,X2=1.2799,X3=-1.5307,X4=1.5164,X5=-1.3020,X6=1.5833),name = "sis_scenario5")
+```
+
+```{r fig.height=6,fig.width=8}
+get_figures_each_sis(beta=c(4,4,4,-6*sqrt(2),4/3), colnames_dt=c("X1","X2","X3","X4","X5"), given_names=c("X1","X2","X3","X4","X5"), scenario1="sissimdata6_0320.RData",designed_params=data.frame(X1=4,X2=4,X3=4,X4=-6*sqrt(2),X5=4/3),name = "sis_scenario6")
+```
+
+# combined simulated data
+
+simulation function
+```{r}
+my_sim_data_0228=function(seed,n,p,beta,outlier,h0,k.shape,outlier_percentage){
+  set.seed(seed)
+corr_matrix <- matrix(0.1, nrow = p, ncol = p)
+diag(corr_matrix) <- 1
+#first 3 are highly correlated
+corr_matrix[1, 2] <- 0.9
+corr_matrix[1, 3] <- 0.9
+corr_matrix[2, 1] <- 0.9
+corr_matrix[3, 1] <- 0.9
+corr_matrix[2, 3] <- 0.9
+corr_matrix[3, 2] <- 0.9
+#4,5,6 are highly correlated
+corr_matrix[4, 5] <- 0.7
+corr_matrix[4, 6] <- 0.7
+corr_matrix[5, 4] <- 0.7
+corr_matrix[5, 6] <- 0.7
+corr_matrix[6, 4] <- 0.7
+corr_matrix[6, 5] <- 0.7
+#4 is not correlated with 1,2,3
+corr_matrix[1, 4] <- 0
+corr_matrix[2, 4] <- 0
+corr_matrix[3, 4] <- 0
+corr_matrix[4, 1] <- 0
+corr_matrix[4, 2] <- 0
+corr_matrix[4, 3] <- 0
+
+  X <- mvrnorm(n, mu=rep(0,p),Sigma = corr_matrix)
+  colnames(X)=paste0("X", 1:p, "")
+      r.u <- runif(n)
+      if(outlier==TRUE){
+      num.out <- n*outlier_percentage#5%outliers
+      gamma <- c(rep(0, n-num.out),  rep(5,ceiling(num.out)))
+      ftime <- (-log(r.u)/((h0^k.shape)*exp(X %*% beta))+gamma)^(1/k.shape)
+      ctime=runif(n,min=0,max=10)
+      time <- pmin(ftime, ctime)
+      status <- as.numeric(ftime <= ctime)
+      current_data2=cbind.data.frame(time,status,X)
+      } else{
+        
+      ftime <- (-log(r.u)/((h0^k.shape)*exp(X %*% beta)))^(1/k.shape)
+      ctime=runif(n,min=0,max=10)
+      time <- pmin(ftime, ctime)
+      status <- as.numeric(ftime <= ctime)
+      current_data2=cbind.data.frame(time,status,X)
+      }
+      return(current_data2)
+}
+
+my_sim_data_0306=function(seed,n,p,beta,outlier,h0,k.shape,outlier_percentage){
+  set.seed(seed)
+corr_matrix <- matrix(0.1, nrow = p, ncol = p)
+diag(corr_matrix) <- 1
+#first 3 are highly correlated
+corr_matrix[1, 2] <- 0.9
+corr_matrix[1, 3] <- 0.9
+corr_matrix[2, 1] <- 0.9
+corr_matrix[3, 1] <- 0.9
+corr_matrix[2, 3] <- 0.9
+corr_matrix[3, 2] <- 0.9
+#4,5,6 are highly correlated
+corr_matrix[4, 5] <- 0.7
+corr_matrix[4, 6] <- 0.7
+corr_matrix[5, 4] <- 0.7
+corr_matrix[5, 6] <- 0.7
+corr_matrix[6, 4] <- 0.7
+corr_matrix[6, 5] <- 0.7
+#4 is not correlated with 1,2,3
+corr_matrix[1, 4] <- 0
+corr_matrix[2, 4] <- 0
+corr_matrix[3, 4] <- 0
+corr_matrix[4, 1] <- 0
+corr_matrix[4, 2] <- 0
+corr_matrix[4, 3] <- 0
+
+  X <- mvrnorm(n, mu=rep(0,p),Sigma = corr_matrix)
+  colnames(X)=paste0("X", 1:p, "")
+      r.u <- runif(n)
+      if(outlier==TRUE){
+      num.out <- n*outlier_percentage#5%outliers
+      gamma <- c(rep(0, n-num.out),  rep(5,ceiling(num.out)))
+      ftime <- (-log(r.u)/((h0^k.shape)*exp(X %*% beta))+gamma)^(1/k.shape)
+      ctime=runif(n,min=0,max=10)
+      time <- pmin(ftime, ctime)
+      status <- as.numeric(ftime <= ctime)
+      current_data2=cbind.data.frame(time,status,X)
+      } else{
+        
+      ftime <- (-log(r.u)/((h0^k.shape)*exp(X %*% beta)))^(1/k.shape)
+      ctime=runif(n,min=0,max=10)
+      time <- pmin(ftime, ctime)
+      status <- as.numeric(ftime <= ctime)
+      current_data2=cbind.data.frame(time,status,X)
+      }
+      return(current_data2)
+}
+```
+
+
+get results function
+```{r}
+summary_table_fun=function(run_result,design_params){
+my_list=sapply(run_result,function(x) x[[1]],simplify = FALSE)
+
+# Extract all unique names
+all_names <- unique(unlist(lapply(my_list, "[",1)))
+
+# Create a matrix with 0s
+matrix_data <- matrix(0, nrow = length(my_list), ncol = length(all_names), dimnames = list(names(my_list), all_names))
+
+# Fill in the matrix with values from the named vectors
+for (i in seq_along(my_list)) {
+  temp_dt=as.data.frame(my_list[[i]])
+  names_i <- temp_dt$Name
+  matrix_data[i, names_i] <- temp_dt$Value
+}
+
+# Function to fill NA with 0 and convert to numeric
+fill_na_convert_numeric <- function(x) {
+  x[is.na(x)] <- 0
+  as.numeric(x)
+}
+
+# Apply the function to each column of the matrix
+matrix_data <- apply(matrix_data, 2, fill_na_convert_numeric)
+
+# Convert the matrix to a data frame
+result_df <- as.data.frame(matrix_data)
+
+# delete zeros for final results
+final_df=round(colMeans(result_df,na.rm = TRUE),2)
+final_df=final_df[final_df!=0]
+
+# get abs diff
+# #vectors_to_subtract=data.frame(X1=1,X2=1,X3=1,X4=1,X5=1,X6=1,X30=1)
+# vectors_to_subtract=design_params
+# columns_to_subtract <- names(vectors_to_subtract)
+# col_name=colnames(result_df)
+# data=as.data.frame(matrix(0,nrow=nrow(result_df),ncol=length(columns_to_subtract)))
+# colnames(data)=columns_to_subtract
+# # Subtract vectors from corresponding columns
+# for (i in 1:length(columns_to_subtract)) {
+#    col_index <- which(colnames(result_df) == col_name[i])
+#   data[, col_index] <- abs(result_df[, col_index] - vectors_to_subtract[[col_name[i]]])
+# }
+# final_df2=colSums(data,na.rm = TRUE)
+final_df2=data.frame(matrix(nrow=nrow(design_params),ncol = ncol(design_params)))
+vectors_to_subtract=design_params
+for(i in 1:length(colnames(design_params))){
+  if(length(final_df)==0){final_df2=NA}else if(length(which(names(final_df) == colnames(design_params)[i]))==0){
+    final_df2[1,i]=abs(design_params[i])
+  }else{
+final_df2[1,i]=abs(final_df[which(names(final_df) == colnames(design_params)[i])]-design_params[i])}
+  }
+colnames(final_df2)=colnames(design_params)
+# get squared error
+# #vectors_to_subtract=data.frame(X1=1,X2=1,X3=1,X4=1,X5=1,X6=1,X30=1)
+# vectors_to_subtract=design_params
+# columns_to_subtract <- names(vectors_to_subtract)
+# col_name=colnames(result_df)
+# data=as.data.frame(matrix(0,nrow=nrow(result_df),ncol=length(columns_to_subtract)))
+# colnames(data)=columns_to_subtract
+# # Subtract vectors from corresponding columns
+# for (i in 1:length(columns_to_subtract)) {
+#    col_index <- which(colnames(result_df) == col_name[i])
+#   data[, col_index] <- (result_df[, col_index] - vectors_to_subtract[[col_name[i]]])^2
+# }
+# final_df3=colSums(data,na.rm = TRUE)
+final_df3=data.frame(matrix(nrow=nrow(design_params),ncol = ncol(design_params)))
+vectors_to_subtract=design_params
+for(i in 1:length(colnames(design_params))){
+  if(length(final_df)==0){final_df3=NA}else if(length(which(names(final_df) == colnames(design_params)[i]))==0){
+    final_df3[1,i]=abs(design_params[i])^2
+  }else{
+final_df3[1,i]=(final_df[which(names(final_df) == colnames(design_params)[i])]-design_params[i])^2}
+  }
+colnames(final_df3)=colnames(design_params)
+return(list(result_df,final_df,final_df2,final_df3))
+}
+
+summary_table_fun2=function(run_result,design_params){
+my_list=sapply(run_result,function(x) x[[1]],simplify = FALSE)
+
+# Extract all unique names
+all_names <- unique(unlist(lapply(my_list, names)))
+
+# Create a matrix with 0s
+matrix_data <- matrix(0, nrow = length(my_list), ncol = length(all_names), dimnames = list(names(my_list), all_names))
+
+# Fill in the matrix with values from the named vectors
+for (i in seq_along(my_list)) {
+  names_i <- names(my_list[[i]])
+  matrix_data[i, names_i] <- my_list[[i]]
+}
+
+# Function to fill NA with 0 and convert to numeric
+fill_na_convert_numeric <- function(x) {
+  x[is.na(x)] <- 0
+  as.numeric(x)
+}
+
+# Apply the function to each column of the matrix
+matrix_data <- apply(matrix_data, 2, fill_na_convert_numeric)
+
+# Convert the matrix to a data frame
+result_df <- as.data.frame(matrix_data)
+
+# delete zeros for final results
+final_df=round(colMeans(result_df,na.rm = TRUE),2)
+final_df=final_df[final_df!=0]
+# get abs diff
+# #vectors_to_subtract=data.frame(X1=1,X2=1,X3=1,X4=1,X5=1,X6=1,X30=1)
+# vectors_to_subtract=design_params
+# columns_to_subtract <- names(vectors_to_subtract)
+# col_name=colnames(result_df)
+# data=as.data.frame(matrix(0,nrow=nrow(result_df),ncol=length(columns_to_subtract)))
+# colnames(data)=columns_to_subtract
+# # Subtract vectors from corresponding columns
+# for (i in 1:length(columns_to_subtract)) {
+#    col_index <- which(colnames(result_df) == col_name[i])
+#   data[, col_index] <- abs(result_df[, col_index] - vectors_to_subtract[[col_name[i]]])
+# }
+# final_df2=colSums(data,na.rm = TRUE)
+final_df2=data.frame(matrix(nrow=nrow(design_params),ncol = ncol(design_params)))
+vectors_to_subtract=design_params
+for(i in 1:length(colnames(design_params))){
+  if(length(final_df)==0){final_df2=NA}else if(length(which(names(final_df) == colnames(design_params)[i]))==0){
+    final_df2[1,i]=abs(design_params[i])
+  }else{
+final_df2[1,i]=abs(final_df[which(names(final_df) == colnames(design_params)[i])]-design_params[i])}
+}
+colnames(final_df2)=colnames(design_params)
+# get squared error
+# #vectors_to_subtract=data.frame(X1=1,X2=1,X3=1,X4=1,X5=1,X6=1,X30=1)
+# vectors_to_subtract=design_params
+# columns_to_subtract <- names(vectors_to_subtract)
+# col_name=colnames(result_df)
+# data=as.data.frame(matrix(0,nrow=nrow(result_df),ncol=length(columns_to_subtract)))
+# colnames(data)=columns_to_subtract
+# # Subtract vectors from corresponding columns
+# for (i in 1:length(columns_to_subtract)) {
+#    col_index <- which(colnames(result_df) == col_name[i])
+#   data[, col_index] <- (result_df[, col_index] - vectors_to_subtract[[col_name[i]]])^2
+# }
+# final_df3=colSums(data,na.rm = TRUE)
+final_df3=data.frame(matrix(nrow=nrow(design_params),ncol = ncol(design_params)))
+vectors_to_subtract=design_params
+for(i in 1:length(colnames(design_params))){
+  if(length(final_df)==0){final_df3=NA}else if(length(which(names(final_df) == colnames(design_params)[i]))==0){
+    final_df3[1,i]=abs(design_params[i])^2
+  }else{
+final_df3[1,i]=(final_df[which(names(final_df) == colnames(design_params)[i])]-design_params[i])^2}
+  }
+colnames(final_df3)=colnames(design_params)
+
+return(list(result_df,final_df,final_df2,final_df3))
+}
+```
+
+```{r}
+get_figures=function(beta, colnames_dt, given_names, scenario1, scenario2,scenario3,scenario4,scenario5,scenario6,scenario7,scenario8,scenario9,designed_params,name)
+{
+load(scenario1)
+# dd=as.data.frame(matrix(0,nrow=6, ncol=7))
+# dd[1,]=beta
+# colnames(dd)=colnames_dt
+# all_list=list(beta,summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+# 
+#   for(i in 2:length(all_list)){
+#     for(j in 1:length(beta)){
+#       dd[i,j]=ifelse(colnames(dd)[j]%in%names(all_list[[i]][[1]]), all_list[[i]][[1]][which(names(all_list[[i]][[1]])==colnames(dd)[j])],0)
+#     }
+#   }
+#  
+# dd2=dd
+# dd2=sweep(dd2,2,beta)
+# dd2=dd2[-1,]
+# dd2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+# highdim_param1=dd2
+
+all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun2(result3,given_names),calculation_fun2(result4,given_names),calculation_fun2(result5,given_names))
+ final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+  highdim_param1_f1=final_cal_table$V3
+  highdim_param1_tp=final_cal_table$V1
+  highdim_param1_fp=final_cal_table$V2
+  
+  highdim_param1_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+  highdim_param1_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+  highdim_param1_return_table=cbind.data.frame(highdim_param1_tp,highdim_param1_fp,highdim_param1_f1,highdim_param1_correctprob,highdim_param1_medianmodelsize)
+  colnames(highdim_param1_return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  highdim_param1_return_table$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+    highdim_param1_mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+highdim_param1_mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    }
+    colnames(highdim_param1_mean_est)=given_names
+    highdim_param1_mean_est$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    highdim_param1=sweep(highdim_param1_mean_est[,1:7],2,beta)
+    highdim_param1$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_sum_abs=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+        highdim_param1_sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+    }
+    colnames(highdim_param1_sum_abs)=given_names
+     highdim_param1_sum_abs$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+     highdim_param1_mse=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+        highdim_param1_mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+    }
+     colnames(highdim_param1_mse)=given_names
+    highdim_param1_mse$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+#     #
+   load(scenario2)
+# dd=as.data.frame(matrix(0,nrow=6, ncol=7))
+# dd[1,]=beta
+# colnames(dd)=colnames_dt
+# all_list=list(beta,summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+# 
+#   for(i in 2:length(all_list)){
+#     for(j in 1:length(beta)){
+#       dd[i,j]=ifelse(colnames(dd)[j]%in%names(all_list[[i]][[1]]), all_list[[i]][[1]][which(names(all_list[[i]][[1]])==colnames(dd)[j])],0)
+#     }
+#   }
+#  
+# dd2=dd
+# dd2=sweep(dd2,2,beta)
+# dd2=dd2[-1,]
+# dd2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+# highdim_param1_outlier0.001=dd2
+
+all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun2(result3,given_names),calculation_fun2(result4,given_names),calculation_fun2(result5,given_names))
+ final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+ highdim_param1_outlier0.001_f1=final_cal_table$V3
+ highdim_param1_outlier0.001_tp=final_cal_table$V1
+ highdim_param1_outlier0.001_fp=final_cal_table$V2
+  
+ highdim_param1_outlier0.001_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+   highdim_param1_outlier0.001_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+ highdim_param1_outlier0.001_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_outlier0.001_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+ highdim_param1_outlier0.001_return_table=cbind.data.frame(highdim_param1_outlier0.001_tp,highdim_param1_outlier0.001_fp,highdim_param1_outlier0.001_f1,highdim_param1_outlier0.001_correctprob,highdim_param1_outlier0.001_medianmodelsize)
+  colnames(highdim_param1_outlier0.001_return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  highdim_param1_outlier0.001_return_table$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+   highdim_param1_outlier0.001_mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+        highdim_param1_outlier0.001_mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    }
+    colnames(highdim_param1_outlier0.001_mean_est)=given_names
+   highdim_param1_outlier0.001_mean_est$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    highdim_param1_outlier0.001=sweep(highdim_param1_outlier0.001_mean_est[,1:7],2,beta)
+    highdim_param1_outlier0.001$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.001_sum_abs=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+   
+        highdim_param1_outlier0.001_sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+ 
+    }
+    colnames(highdim_param1_outlier0.001_sum_abs)=given_names
+     highdim_param1_outlier0.001_sum_abs$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.001_mse=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+      
+        highdim_param1_outlier0.001_mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+    
+    }
+     colnames(highdim_param1_outlier0.001_mse)=given_names
+    highdim_param1_outlier0.001_mse$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+        #
+   load(scenario3)
+# dd=as.data.frame(matrix(0,nrow=6, ncol=7))
+# dd[1,]=beta
+# colnames(dd)=colnames_dt
+# all_list=list(beta,summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+# 
+#   for(i in 2:length(all_list)){
+#     for(j in 1:length(beta)){
+#       dd[i,j]=ifelse(colnames(dd)[j]%in%names(all_list[[i]][[1]]), all_list[[i]][[1]][which(names(all_list[[i]][[1]])==colnames(dd)[j])],0)
+#     }
+#   }
+#  
+# dd2=dd
+# dd2=sweep(dd2,2,beta)
+# dd2=dd2[-1,]
+# dd2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+# highdim_param1_outlier0.002=dd2
+
+all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun2(result3,given_names),calculation_fun2(result4,given_names),calculation_fun2(result5,given_names))
+ final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+ highdim_param1_outlier0.002_f1=final_cal_table$V3
+ highdim_param1_outlier0.002_tp=final_cal_table$V1
+ highdim_param1_outlier0.002_fp=final_cal_table$V2
+  
+ highdim_param1_outlier0.002_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+   highdim_param1_outlier0.002_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+ highdim_param1_outlier0.002_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_outlier0.002_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+ highdim_param1_outlier0.002_return_table=cbind.data.frame(highdim_param1_outlier0.002_tp,highdim_param1_outlier0.002_fp,highdim_param1_outlier0.002_f1,highdim_param1_outlier0.002_correctprob,highdim_param1_outlier0.002_medianmodelsize)
+  colnames(highdim_param1_outlier0.002_return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  highdim_param1_outlier0.002_return_table$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+   highdim_param1_outlier0.002_mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+    
+        highdim_param1_outlier0.002_mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+     
+    }
+    colnames(highdim_param1_outlier0.002_mean_est)=given_names
+   highdim_param1_outlier0.002_mean_est$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+     highdim_param1_outlier0.002=sweep(highdim_param1_outlier0.002_mean_est[,1:7],2,beta)
+    highdim_param1_outlier0.002$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.002_sum_abs=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+       
+        highdim_param1_outlier0.002_sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+    
+    }
+    colnames(highdim_param1_outlier0.002_sum_abs)=given_names
+     highdim_param1_outlier0.002_sum_abs$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.002_mse=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+     
+        highdim_param1_outlier0.002_mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+   
+    }
+     colnames(highdim_param1_outlier0.002_mse)=given_names
+    highdim_param1_outlier0.002_mse$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    #
+    #
+    load(scenario4)
+# dd=as.data.frame(matrix(0,nrow=6, ncol=7))
+# dd[1,]=beta
+# colnames(dd)=colnames_dt
+# all_list=list(beta,summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+# 
+#   for(i in 2:length(all_list)){
+#     for(j in 1:length(beta)){
+#       dd[i,j]=ifelse(colnames(dd)[j]%in%names(all_list[[i]][[1]]), all_list[[i]][[1]][which(names(all_list[[i]][[1]])==colnames(dd)[j])],0)
+#     }
+#   }
+#  
+# dd2=dd
+# dd2=sweep(dd2,2,beta)
+# dd2=dd2[-1,]
+# dd2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+# highdim_param1_outlier0.005=dd2
+
+all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun2(result3,given_names),calculation_fun2(result4,given_names),calculation_fun2(result5,given_names))
+ final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+ highdim_param1_outlier0.005_f1=final_cal_table$V3
+ highdim_param1_outlier0.005_tp=final_cal_table$V1
+ highdim_param1_outlier0.005_fp=final_cal_table$V2
+  
+ highdim_param1_outlier0.005_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+   highdim_param1_outlier0.005_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+ highdim_param1_outlier0.005_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_outlier0.005_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+ highdim_param1_outlier0.005_return_table=cbind.data.frame(highdim_param1_outlier0.005_tp,highdim_param1_outlier0.005_fp,highdim_param1_outlier0.005_f1,highdim_param1_outlier0.005_correctprob,highdim_param1_outlier0.005_medianmodelsize)
+  colnames(highdim_param1_outlier0.005_return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  highdim_param1_outlier0.005_return_table$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+   highdim_param1_outlier0.005_mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+    
+        highdim_param1_outlier0.005_mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+   
+    }
+    colnames(highdim_param1_outlier0.005_mean_est)=given_names
+   highdim_param1_outlier0.005_mean_est$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+     highdim_param1_outlier0.005=sweep(highdim_param1_outlier0.005_mean_est[,1:7],2,beta)
+    highdim_param1_outlier0.005$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.005_sum_abs=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+     
+        highdim_param1_outlier0.005_sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+     
+    }
+    colnames(highdim_param1_outlier0.005_sum_abs)=given_names
+     highdim_param1_outlier0.005_sum_abs$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.005_mse=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+      
+        highdim_param1_outlier0.005_mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+    
+    }
+     colnames(highdim_param1_outlier0.005_mse)=given_names
+    highdim_param1_outlier0.005_mse$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    #
+    load(scenario5)
+# dd=as.data.frame(matrix(0,nrow=6, ncol=7))
+# dd[1,]=beta
+# colnames(dd)=colnames_dt
+# all_list=list(beta,summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+# 
+#   for(i in 2:length(all_list)){
+#     for(j in 1:length(beta)){
+#       dd[i,j]=ifelse(colnames(dd)[j]%in%names(all_list[[i]][[1]]), all_list[[i]][[1]][which(names(all_list[[i]][[1]])==colnames(dd)[j])],0)
+#     }
+#   }
+#  
+# dd2=dd
+# dd2=sweep(dd2,2,beta)
+# dd2=dd2[-1,]
+# dd2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+# highdim_param1_outlier0.01=dd2
+
+all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun2(result3,given_names),calculation_fun2(result4,given_names),calculation_fun2(result5,given_names))
+ final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+ highdim_param1_outlier0.01_f1=final_cal_table$V3
+ highdim_param1_outlier0.01_tp=final_cal_table$V1
+ highdim_param1_outlier0.01_fp=final_cal_table$V2
+  
+ highdim_param1_outlier0.01_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+   highdim_param1_outlier0.01_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+ highdim_param1_outlier0.01_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_outlier0.01_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+ highdim_param1_outlier0.01_return_table=cbind.data.frame(highdim_param1_outlier0.01_tp,highdim_param1_outlier0.01_fp,highdim_param1_outlier0.01_f1,highdim_param1_outlier0.01_correctprob,highdim_param1_outlier0.01_medianmodelsize)
+  colnames(highdim_param1_outlier0.01_return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  highdim_param1_outlier0.01_return_table$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+   highdim_param1_outlier0.01_mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+   
+        highdim_param1_outlier0.01_mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+   
+    }
+    colnames(highdim_param1_outlier0.01_mean_est)=given_names
+   highdim_param1_outlier0.01_mean_est$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+     highdim_param1_outlier0.01=sweep(highdim_param1_outlier0.01_mean_est[,1:7],2,beta)
+    highdim_param1_outlier0.01$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.01_sum_abs=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+     
+        highdim_param1_outlier0.01_sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+
+    }
+    colnames(highdim_param1_outlier0.01_sum_abs)=given_names
+     highdim_param1_outlier0.01_sum_abs$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.01_mse=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+    
+        highdim_param1_outlier0.01_mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+
+    }
+     colnames(highdim_param1_outlier0.01_mse)=given_names
+    highdim_param1_outlier0.01_mse$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    #
+    load(scenario6)
+# dd=as.data.frame(matrix(0,nrow=6, ncol=7))
+# dd[1,]=beta
+# colnames(dd)=colnames_dt
+# all_list=list(beta,summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+# 
+#   for(i in 2:length(all_list)){
+#     for(j in 1:length(beta)){
+#       dd[i,j]=ifelse(colnames(dd)[j]%in%names(all_list[[i]][[1]]), all_list[[i]][[1]][which(names(all_list[[i]][[1]])==colnames(dd)[j])],0)
+#     }
+#   }
+#  
+# dd2=dd
+# dd2=sweep(dd2,2,beta)
+# dd2=dd2[-1,]
+# dd2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+# highdim_param1_outlier0.02=dd2
+
+all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun2(result3,given_names),calculation_fun2(result4,given_names),calculation_fun2(result5,given_names))
+ final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+ highdim_param1_outlier0.02_f1=final_cal_table$V3
+ highdim_param1_outlier0.02_tp=final_cal_table$V1
+ highdim_param1_outlier0.02_fp=final_cal_table$V2
+  
+ highdim_param1_outlier0.02_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+   highdim_param1_outlier0.02_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+ highdim_param1_outlier0.02_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_outlier0.02_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+ highdim_param1_outlier0.02_return_table=cbind.data.frame(highdim_param1_outlier0.02_tp,highdim_param1_outlier0.02_fp,highdim_param1_outlier0.02_f1,highdim_param1_outlier0.02_correctprob,highdim_param1_outlier0.02_medianmodelsize)
+  colnames(highdim_param1_outlier0.02_return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  highdim_param1_outlier0.02_return_table$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+   highdim_param1_outlier0.02_mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+      
+        highdim_param1_outlier0.02_mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    
+    }
+    colnames(highdim_param1_outlier0.02_mean_est)=given_names
+   highdim_param1_outlier0.02_mean_est$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+     highdim_param1_outlier0.02=sweep(highdim_param1_outlier0.02_mean_est[,1:7],2,beta)
+    highdim_param1_outlier0.02$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.02_sum_abs=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+     
+        highdim_param1_outlier0.02_sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+   
+    }
+    colnames(highdim_param1_outlier0.02_sum_abs)=given_names
+     highdim_param1_outlier0.02_sum_abs$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.02_mse=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+      
+        highdim_param1_outlier0.02_mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+     
+    }
+     colnames(highdim_param1_outlier0.02_mse)=given_names
+    highdim_param1_outlier0.02_mse$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    #
+    load(scenario7)
+# dd=as.data.frame(matrix(0,nrow=6, ncol=7))
+# dd[1,]=beta
+# colnames(dd)=colnames_dt
+# all_list=list(beta,summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+# 
+#   for(i in 2:length(all_list)){
+#     for(j in 1:length(beta)){
+#       dd[i,j]=ifelse(colnames(dd)[j]%in%names(all_list[[i]][[1]]), all_list[[i]][[1]][which(names(all_list[[i]][[1]])==colnames(dd)[j])],0)
+#     }
+#   }
+#  
+# dd2=dd
+# dd2=sweep(dd2,2,beta)
+# dd2=dd2[-1,]
+# dd2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+# highdim_param1_outlier0.05=dd2
+
+all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun2(result3,given_names),calculation_fun2(result4,given_names),calculation_fun2(result5,given_names))
+ final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+ highdim_param1_outlier0.05_f1=final_cal_table$V3
+ highdim_param1_outlier0.05_tp=final_cal_table$V1
+ highdim_param1_outlier0.05_fp=final_cal_table$V2
+  
+ highdim_param1_outlier0.05_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+   highdim_param1_outlier0.05_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+ highdim_param1_outlier0.05_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_outlier0.05_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+ highdim_param1_outlier0.05_return_table=cbind.data.frame(highdim_param1_outlier0.05_tp,highdim_param1_outlier0.05_fp,highdim_param1_outlier0.05_f1,highdim_param1_outlier0.05_correctprob,highdim_param1_outlier0.05_medianmodelsize)
+  colnames(highdim_param1_outlier0.05_return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  highdim_param1_outlier0.05_return_table$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+   highdim_param1_outlier0.05_mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+    
+        highdim_param1_outlier0.05_mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    
+    }
+    colnames(highdim_param1_outlier0.05_mean_est)=given_names
+   highdim_param1_outlier0.05_mean_est$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+     highdim_param1_outlier0.05=sweep(highdim_param1_outlier0.05_mean_est[,1:7],2,beta)
+    highdim_param1_outlier0.05$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.05_sum_abs=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+     
+        highdim_param1_outlier0.05_sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+     
+    }
+    colnames(highdim_param1_outlier0.05_sum_abs)=given_names
+     highdim_param1_outlier0.05_sum_abs$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.05_mse=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+     
+        highdim_param1_outlier0.05_mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+    
+    }
+     colnames(highdim_param1_outlier0.05_mse)=given_names
+    highdim_param1_outlier0.05_mse$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    #
+    load(scenario8)
+# dd=as.data.frame(matrix(0,nrow=6, ncol=7))
+# dd[1,]=beta
+# colnames(dd)=colnames_dt
+# all_list=list(beta,summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+# 
+#   for(i in 2:length(all_list)){
+#     for(j in 1:length(beta)){
+#       dd[i,j]=ifelse(colnames(dd)[j]%in%names(all_list[[i]][[1]]), all_list[[i]][[1]][which(names(all_list[[i]][[1]])==colnames(dd)[j])],0)
+#     }
+#   }
+
+# dd2=dd
+# dd2=sweep(dd2,2,beta)
+# dd2=dd2[-1,]
+# dd2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+# highdim_param1_outlier0.1=dd2
+
+all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun2(result3,given_names),calculation_fun2(result4,given_names),calculation_fun2(result5,given_names))
+ final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+ highdim_param1_outlier0.1_f1=final_cal_table$V3
+ highdim_param1_outlier0.1_tp=final_cal_table$V1
+ highdim_param1_outlier0.1_fp=final_cal_table$V2
+  
+ highdim_param1_outlier0.1_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+   highdim_param1_outlier0.1_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+ highdim_param1_outlier0.1_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_outlier0.1_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+ highdim_param1_outlier0.1_return_table=cbind.data.frame(highdim_param1_outlier0.1_tp,highdim_param1_outlier0.1_fp,highdim_param1_outlier0.1_f1,highdim_param1_outlier0.1_correctprob,highdim_param1_outlier0.1_medianmodelsize)
+  colnames(highdim_param1_outlier0.1_return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  highdim_param1_outlier0.1_return_table$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+   highdim_param1_outlier0.1_mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+   
+        highdim_param1_outlier0.1_mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    
+    }
+    colnames(highdim_param1_outlier0.1_mean_est)=given_names
+   highdim_param1_outlier0.1_mean_est$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+     highdim_param1_outlier0.1=sweep(highdim_param1_outlier0.1_mean_est[,1:7],2,beta)
+    highdim_param1_outlier0.1$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.1_sum_abs=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+    
+        highdim_param1_outlier0.1_sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+    
+    }
+    colnames(highdim_param1_outlier0.1_sum_abs)=given_names
+     highdim_param1_outlier0.1_sum_abs$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.1_mse=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+     
+        highdim_param1_outlier0.1_mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+ 
+    }
+     colnames(highdim_param1_outlier0.1_mse)=given_names
+    highdim_param1_outlier0.1_mse$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    #
+    load(scenario9)
+# dd=as.data.frame(matrix(0,nrow=6, ncol=7))
+# dd[1,]=beta
+# colnames(dd)=colnames_dt
+# all_list=list(beta,summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+# 
+#   for(i in 2:length(all_list)){
+#     for(j in 1:length(beta)){
+#       dd[i,j]=ifelse(colnames(dd)[j]%in%names(all_list[[i]][[1]]), all_list[[i]][[1]][which(names(all_list[[i]][[1]])==colnames(dd)[j])],0)
+#     }
+#   }
+#  
+# dd2=dd
+# dd2=sweep(dd2,2,beta)
+# dd2=dd2[-1,]
+# dd2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+# highdim_param1_outlier0.2=dd2
+
+all_cal_list=list(calculation_fun(result1,given_names),calculation_fun(result2,given_names),calculation_fun2(result3,given_names),calculation_fun2(result4,given_names),calculation_fun2(result5,given_names))
+ final_cal_table=as.data.frame(matrix(0,nrow=length(all_cal_list),ncol=3))
+  for(i in 1:length(all_cal_list)){
+    for(j in 1:3){
+      final_cal_table[i,j]=all_cal_list[[i]][[1]][[j]]
+    }
+  }
+ highdim_param1_outlier0.2_f1=final_cal_table$V3
+ highdim_param1_outlier0.2_tp=final_cal_table$V1
+ highdim_param1_outlier0.2_fp=final_cal_table$V2
+  
+ highdim_param1_outlier0.2_correctprob=c()
+  for(i in 1:length(all_cal_list)){
+   highdim_param1_outlier0.2_correctprob[i]=all_cal_list[[i]][[4]]/100
+  }
+  
+ highdim_param1_outlier0.2_medianmodelsize=c()
+  for(i in 1:length(all_cal_list)){
+    highdim_param1_outlier0.2_medianmodelsize[i]=median(all_cal_list[[i]][[3]])
+  }
+  
+ highdim_param1_outlier0.2_return_table=cbind.data.frame(highdim_param1_outlier0.2_tp,highdim_param1_outlier0.2_fp,highdim_param1_outlier0.2_f1,highdim_param1_outlier0.2_correctprob,highdim_param1_outlier0.2_medianmodelsize)
+  colnames(highdim_param1_outlier0.2_return_table)=c("TP","FP","F1 score","Correct mod prob","Median mod size")
+  highdim_param1_outlier0.2_return_table$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+  
+    all_list2=list(summary_table_fun(result1,designed_params),summary_table_fun(result2,designed_params),summary_table_fun2(result3,designed_params),summary_table_fun2(result4,designed_params),summary_table_fun2(result5,designed_params))
+   highdim_param1_outlier0.2_mean_est=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+    
+        highdim_param1_outlier0.2_mean_est[i,which(given_names%in%names(all_list2[[i]][[2]]))]=all_list2[[i]][[2]]
+    
+    }
+    colnames(highdim_param1_outlier0.2_mean_est)=given_names
+   highdim_param1_outlier0.2_mean_est$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+     highdim_param1_outlier0.2=sweep(highdim_param1_outlier0.2_mean_est[,1:7],2,beta)
+    highdim_param1_outlier0.2$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.2_sum_abs=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+    
+        highdim_param1_outlier0.2_sum_abs[i,which(given_names%in%names(all_list2[[i]][[3]]))]=all_list2[[i]][[3]]
+    
+    }
+    colnames(highdim_param1_outlier0.2_sum_abs)=given_names
+     highdim_param1_outlier0.2_sum_abs$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+    highdim_param1_outlier0.2_mse=data.frame(matrix(0,nrow = length(all_list2),ncol = 7))
+    for(i in 1:length(all_list2)){
+    
+       highdim_param1_outlier0.2_mse[i,which(given_names%in%names(all_list2[[i]][[4]]))]=all_list2[[i]][[4]]
+   
+    }
+     colnames(highdim_param1_outlier0.2_mse)=given_names
+    highdim_param1_outlier0.2_mse$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+    
+########
+highdim_param1_all=rbind.data.frame(highdim_param1,highdim_param1_outlier0.001,highdim_param1_outlier0.002,highdim_param1_outlier0.005,highdim_param1_outlier0.01,highdim_param1_outlier0.02,highdim_param1_outlier0.05,highdim_param1_outlier0.1,highdim_param1_outlier0.2)
+highdim_param1_all$outlier=c(rep(0,5),rep(0.001,5),rep(0.002,5),rep(0.005,5),rep(0.01,5),rep(0.02,5),rep(0.05,5),rep(0.1,5),rep(0.2,5))
+highdim_param1_all$outlier_level=c(rep("0",5),rep("0.001",5),rep("0.002",5),rep("0.005",5),rep("0.01",5),rep("0.02",5),rep("0.05",5),rep("0.1",5),rep("0.2",5))
+highdim_param1_all$method=factor(highdim_param1_all$method,levels = c("lasso","enet","mcp","pawph","sis"))
+highdim_param1_long <- melt(setDT(highdim_param1_all), id.vars = c("method","outlier","outlier_level"), variable.name = "Variable")
+
+
+p <- ggplot(data = highdim_param1_long, aes(x = outlier_level, y = value,color=method,group=method)) + geom_line()+geom_point()+theme_bw()+ggtitle("Comparison with different levels of outliers (show diff in est.)")+geom_hline(yintercept = 0,color="black")
+p + facet_wrap(~Variable,ncol=7)
+#ggsave(p + facet_wrap(~Variable,ncol=7),file=paste(name,"line_plot.pdf",sep = "_"),height=4,width=24)
+
+
+highdim_param1_f1_all=cbind.data.frame(highdim_param1_f1,highdim_param1_outlier0.001_f1,highdim_param1_outlier0.002_f1,highdim_param1_outlier0.005_f1,highdim_param1_outlier0.01_f1,highdim_param1_outlier0.02_f1,highdim_param1_outlier0.05_f1,highdim_param1_outlier0.1_f1,highdim_param1_outlier0.2_f1)
+highdim_param1_f1_all$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+colnames(highdim_param1_f1_all)=c("0","0.001","0.002","0.005","0.01","0.02","0.05","0.1","0.2","Method")
+
+highdim_param1_tp_all=cbind.data.frame(highdim_param1_tp,highdim_param1_outlier0.001_tp,highdim_param1_outlier0.002_tp,highdim_param1_outlier0.005_tp,highdim_param1_outlier0.01_tp,highdim_param1_outlier0.02_tp,highdim_param1_outlier0.05_tp,highdim_param1_outlier0.1_tp,highdim_param1_outlier0.2_tp)
+highdim_param1_tp_all$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+colnames(highdim_param1_tp_all)=c("0","0.001","0.002","0.005","0.01","0.02","0.05","0.1","0.2","Method")
+
+highdim_param1_fp_all=cbind.data.frame(highdim_param1_fp,highdim_param1_outlier0.001_fp,highdim_param1_outlier0.002_fp,highdim_param1_outlier0.005_fp,highdim_param1_outlier0.01_fp,highdim_param1_outlier0.02_fp,highdim_param1_outlier0.05_fp,highdim_param1_outlier0.1_fp,highdim_param1_outlier0.2_fp)
+highdim_param1_fp_all$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+colnames(highdim_param1_fp_all)=c("0","0.001","0.002","0.005","0.01","0.02","0.05","0.1","0.2","Method")
+
+highdim_param1_medianmodelsize_all=cbind.data.frame(highdim_param1_medianmodelsize,highdim_param1_outlier0.001_medianmodelsize,highdim_param1_outlier0.002_medianmodelsize,highdim_param1_outlier0.005_medianmodelsize,highdim_param1_outlier0.01_medianmodelsize,highdim_param1_outlier0.02_medianmodelsize,highdim_param1_outlier0.05_medianmodelsize,highdim_param1_outlier0.1_medianmodelsize,highdim_param1_outlier0.2_medianmodelsize)
+highdim_param1_medianmodelsize_all$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+colnames(highdim_param1_medianmodelsize_all)=c("0","0.001","0.002","0.005","0.01","0.02","0.05","0.1","0.2","Method")
+
+
+highdim_param1_correctprob_all=cbind.data.frame(highdim_param1_correctprob,highdim_param1_outlier0.001_correctprob,highdim_param1_outlier0.002_correctprob,highdim_param1_outlier0.005_correctprob,highdim_param1_outlier0.01_correctprob,highdim_param1_outlier0.02_correctprob,highdim_param1_outlier0.05_correctprob,highdim_param1_outlier0.1_correctprob,highdim_param1_outlier0.2_correctprob)
+highdim_param1_correctprob_all$method=factor(c("lasso","enet","mcp","pawph","sis"),levels = c("lasso","enet","mcp","pawph","sis"))
+colnames(highdim_param1_correctprob_all)=c("0","0.001","0.002","0.005","0.01","0.02","0.05","0.1","0.2","Method")
+
+highdim_param1_tp_all_long <- melt(setDT(highdim_param1_tp_all), id.vars = c("Method"), variable.name = "Outlier_percentage")
+tpgg=ggplot(data = highdim_param1_tp_all_long,aes(x = Outlier_percentage,y = value,fill=Method)) +geom_bar(stat= "identity",position="dodge")+theme_bw()+ggtitle("True positive")+geom_hline(yintercept=7,color="black")
+#+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+#ggsave(tpgg,file=paste(name,"tp_plot.pdf",sep = "_"),height=5,width=10)
+
+highdim_param1_fp_all_long <- melt(setDT(highdim_param1_fp_all), id.vars = c("Method"), variable.name = "Outlier_percentage")
+tpgg=ggplot(data = highdim_param1_fp_all_long,aes(x = Outlier_percentage,y = value,fill=Method)) +geom_bar(stat= "identity",position="dodge")+theme_bw()+ggtitle("False positive")
+#+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+#ggsave(tpgg,file=paste(name,"fp_plot.pdf",sep = "_"),height=5,width=10)
+
+highdim_param1_medianmodelsize_all_long <- melt(setDT(highdim_param1_medianmodelsize_all), id.vars = c("Method"), variable.name = "Outlier_percentage")
+tpgg=ggplot(data = highdim_param1_medianmodelsize_all_long,aes(x = Outlier_percentage,y = value,fill=Method)) +geom_bar(stat= "identity",position="dodge")+theme_bw()+ggtitle("Mean model size")
+#+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+#ggsave(tpgg,file=paste(name,"mean_model_size_plot.pdf",sep = "_"),height=5,width=10)
+
+highdim_param1_correctprob_all_long <- melt(setDT(highdim_param1_correctprob_all), id.vars = c("Method"), variable.name = "Outlier_percentage")
+tpgg=ggplot(data = highdim_param1_correctprob_all_long,aes(x = Outlier_percentage,y = value,fill=Method)) +geom_bar(stat= "identity",position="dodge")+theme_bw()+ggtitle("Correct prob")+ylim(c(0,1))
+#+theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+#ggsave(tpgg,file=paste(name,"correctprob_plot.pdf",sep = "_"),height=5,width=10)
+
+
+mean_list=list(highdim_param1_mean_est,highdim_param1_outlier0.001_mean_est,highdim_param1_outlier0.002_mean_est,highdim_param1_outlier0.005_mean_est,highdim_param1_outlier0.01_mean_est,highdim_param1_outlier0.02_mean_est,highdim_param1_outlier0.05_mean_est,highdim_param1_outlier0.1_mean_est,highdim_param1_outlier0.2_mean_est)
+abs_list=list(highdim_param1_sum_abs,highdim_param1_outlier0.001_sum_abs,highdim_param1_outlier0.002_sum_abs,highdim_param1_outlier0.005_sum_abs,highdim_param1_outlier0.01_sum_abs,highdim_param1_outlier0.02_sum_abs,highdim_param1_outlier0.05_sum_abs,highdim_param1_outlier0.1_sum_abs,highdim_param1_outlier0.2_sum_abs)
+mse_list=list(highdim_param1_mse,highdim_param1_outlier0.001_mse,highdim_param1_outlier0.002_mse,highdim_param1_outlier0.005_mse,highdim_param1_outlier0.01_mse,highdim_param1_outlier0.02_mse,highdim_param1_outlier0.05_mse,highdim_param1_outlier0.1_mse,highdim_param1_outlier0.2_mse)
+return(list(highdim_param1_all,highdim_param1_f1_all,highdim_param1_tp_all,highdim_param1_fp_all,highdim_param1_medianmodelsize_all,highdim_param1_correctprob_all,mean_list,abs_list,mse_list))
+}
+
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(10,-3,3,-10,-3,3,5),colnames_dt=c("X1","X2","X3","X4","X5","X6","X30"),given_names = c("X1","X2","X3","X4","X5","X6","X30"),scenario1="simdata_lowdim_param1_0308.RData",scenario2 = "simdata_lowdim_outlier0.001_param1_0308.RData",scenario3 = "simdata_lowdim_outlier0.002_param1_0308.RData",scenario4 = "simdata_lowdim_outlier0.005_param1_0308.RData",scenario5 = "simdata_lowdim_outlier0.01_param1_0308.RData",scenario6 = "simdata_lowdim_outlier0.02_param1_0308.RData",scenario7 = "simdata_lowdim_outlier0.05_param1_0308.RData",scenario8 = "simdata_lowdim_outlier0.1_param1_0308.RData",scenario9 = "simdata_lowdim_outlier0.2_param1_0308.RData",designed_params=data.frame(X1=10,X2=-3,X3=3,X4=-10,X5=-3,X6=3,X30=5),name="Param1_lowdim")
+
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(10,-3,3,-10,-3,3,5),colnames_dt=c("X1","X2","X3","X4","X5","X6","X1000"),given_names = c("X1","X2","X3","X4","X5","X6","X1000"),scenario1="simdata_highdim_param1_0308.RData",scenario2 = "simdata_highdim_outlier0.001_param1_0308.RData",scenario3 = "simdata_highdim_outlier0.002_param1_0308.RData",scenario4 = "simdata_highdim_outlier0.005_param1_0308.RData",scenario5 = "simdata_highdim_outlier0.01_param1_0308.RData",scenario6 = "simdata_highdim_outlier0.02_param1_0308.RData",scenario7 = "simdata_highdim_outlier0.05_param1_0308.RData",scenario8 = "simdata_highdim_outlier0.1_param1_0308.RData",scenario9 = "simdata_highdim_outlier0.2_param1_0308.RData",designed_params=data.frame(X1=10,X2=-3,X3=3,X4=-10,X5=-3,X6=3,X1000=5),name="Param1_highdim")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(10,0,3,-10,-3,0,5),colnames_dt=c("X1","X2","X3","X4","X5","X6","X30"),given_names = c("X1","X3","X4","X5","X30"),scenario1="simdata_lowdim_param2_0308.RData",scenario2 = "simdata_lowdim_outlier0.001_param2_0308.RData",scenario3 = "simdata_lowdim_outlier0.002_param2_0308.RData",scenario4 = "simdata_lowdim_outlier0.005_param2_0308.RData",scenario5 = "simdata_lowdim_outlier0.01_param2_0308.RData",scenario6 = "simdata_lowdim_outlier0.02_param2_0308.RData",scenario7 = "simdata_lowdim_outlier0.05_param2_0308.RData",scenario8 = "simdata_lowdim_outlier0.1_param2_0308.RData",scenario9 = "simdata_lowdim_outlier0.2_param2_0308.RData",designed_params=data.frame(X1=10,X2=0,X3=3,X4=-10,X5=-3,X6=0,X1000=5),name="Param2_lowdim")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(10,0,3,-10,-3,0,5),colnames_dt=c("X1","X2","X3","X4","X5","X6","X1000"),given_names = c("X1","X3","X4","X5","X1000"),scenario1="simdata_highdim_param2_0308.RData",scenario2 = "simdata_highdim_outlier0.001_param2_0308.RData",scenario3 = "simdata_highdim_outlier0.002_param2_0308.RData",scenario4 = "simdata_highdim_outlier0.005_param2_0308.RData",scenario5 = "simdata_highdim_outlier0.01_param2_0308.RData",scenario6 = "simdata_highdim_outlier0.02_param2_0308.RData",scenario7 = "simdata_highdim_outlier0.05_param2_0308.RData",scenario8 = "simdata_highdim_outlier0.1_param2_0308.RData",scenario9 = "simdata_highdim_outlier0.2_param2_0308.RData",designed_params=data.frame(X1=10,X2=0,X3=3,X4=-10,X5=-3,X6=0,X1000=5),name="Param2_highdim")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(2,-3,3,-2,-3,3,2),colnames_dt=c("X1","X2","X3","X4","X5","X6","X30"),given_names = c("X1","X2","X3","X4","X5","X6","X30"),scenario1="simdata_lowdim_param3_0308.RData",scenario2 = "simdata_lowdim_outlier0.001_param3_0308.RData",scenario3 = "simdata_lowdim_outlier0.002_param3_0308.RData",scenario4 = "simdata_lowdim_outlier0.005_param3_0308.RData",scenario5 = "simdata_lowdim_outlier0.01_param3_0308.RData",scenario6 = "simdata_lowdim_outlier0.02_param3_0308.RData",scenario7 = "simdata_lowdim_outlier0.05_param3_0308.RData",scenario8 = "simdata_lowdim_outlier0.1_param3_0308.RData",scenario9 = "simdata_lowdim_outlier0.2_param3_0308.RData",designed_params=data.frame(X1=2,X2=-3,X3=3,X4=-2,X5=-3,X6=3,X30=2),name="Param3_lowdim")
+```
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(2,-3,3,-2,-3,3,2),colnames_dt=c("X1","X2","X3","X4","X5","X6","X1000"),given_names = c("X1","X2","X3","X4","X5","X6","X1000"),scenario1="simdata_highdim_param3_0308.RData",scenario2 = "simdata_highdim_outlier0.001_param3_0308.RData",scenario3 = "simdata_highdim_outlier0.002_param3_0308.RData",scenario4 = "simdata_highdim_outlier0.005_param3_0308.RData",scenario5 = "simdata_highdim_outlier0.01_param3_0308.RData",scenario6 = "simdata_highdim_outlier0.02_param3_0308.RData",scenario7 = "simdata_highdim_outlier0.05_param3_0308.RData",scenario8 = "simdata_highdim_outlier0.1_param3_0308.RData",scenario9 = "simdata_highdim_outlier0.2_param3_0308.RData",designed_params=data.frame(X1=2,X2=-3,X3=3,X4=-2,X5=-3,X6=3,X1000=2),name="Param3_highdim")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(2,-3,3,-2,-3,3,2),colnames_dt=c("X1","X2","X3","X4","X5","X6","X30"),given_names = c("X1","X2","X3","X4","X5","X6","X30"),scenario1="simdata_lowdim_param3_0311.RData",scenario2 = "simdata_lowdim_outlier0.001_param3_0311.RData",scenario3 = "simdata_lowdim_outlier0.002_param3_0311.RData",scenario4 = "simdata_lowdim_outlier0.005_param3_0311.RData",scenario5 = "simdata_lowdim_outlier0.01_param3_0311.RData",scenario6 = "simdata_lowdim_outlier0.02_param3_0311.RData",scenario7 = "simdata_lowdim_outlier0.05_param3_0311.RData",scenario8 = "simdata_lowdim_outlier0.1_param3_0311.RData",scenario9 = "simdata_lowdim_outlier0.2_param3_0311.RData",designed_params=data.frame(X1=2,X2=-3,X3=3,X4=-2,X5=-3,X6=3,X30=2),name="Param3_lowdim_1000")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(2,-3,3,-2,-3,3,2),colnames_dt=c("X1","X2","X3","X4","X5","X6","X1000"),given_names = c("X1","X2","X3","X4","X5","X6","X1000"),scenario1="simdata_highdim_param3_0311.RData",scenario2 = "simdata_highdim_outlier0.001_param3_0311.RData",scenario3 = "simdata_highdim_outlier0.002_param3_0311.RData",scenario4 = "simdata_highdim_outlier0.005_param3_0311.RData",scenario5 = "simdata_highdim_outlier0.01_param3_0311.RData",scenario6 = "simdata_highdim_outlier0.02_param3_0311.RData",scenario7 = "simdata_highdim_outlier0.05_param3_0311.RData",scenario8 = "simdata_highdim_outlier0.1_param3_0311.RData",scenario9 = "simdata_highdim_outlier0.2_param3_0311.RData",designed_params=data.frame(X1=2,X2=-3,X3=3,X4=-2,X5=-3,X6=3,X1000=2),name="Param3_highdim_1000")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(0,0,3,0,-3,0,5),colnames_dt=c("X1","X2","X3","X4","X5","X6","X30"),given_names = c("X3","X5","X30"),scenario1="simdata_lowdim_param4_0314.RData",scenario2 = "simdata_lowdim_outlier0.001_param4_0314.RData",scenario3 = "simdata_lowdim_outlier0.002_param4_0314.RData",scenario4 = "simdata_lowdim_outlier0.005_param4_0314.RData",scenario5 = "simdata_lowdim_outlier0.01_param4_0314.RData",scenario6 = "simdata_lowdim_outlier0.02_param4_0314.RData",scenario7 = "simdata_lowdim_outlier0.05_param4_0314.RData",scenario8 = "simdata_lowdim_outlier0.1_param4_0314.RData",scenario9 = "simdata_lowdim_outlier0.2_param4_0314.RData",designed_params=data.frame(X1=0,X2=0,X3=3,X4=0,X5=-3,X6=0,X30=5),name="Param4_lowdim")
+```
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(0,0,3,0,-3,0,5),colnames_dt=c("X1","X2","X3","X4","X5","X6","X1000"),given_names = c("X3","X5","X1000"),scenario1="simdata_highdim_param4_0314.RData",scenario2 = "simdata_highdim_outlier0.001_param4_0314.RData",scenario3 = "simdata_highdim_outlier0.002_param4_0314.RData",scenario4 = "simdata_highdim_outlier0.005_param4_0314.RData",scenario5 = "simdata_highdim_outlier0.01_param4_0314.RData",scenario6 = "simdata_highdim_outlier0.02_param4_0314.RData",scenario7 = "simdata_highdim_outlier0.05_param4_0314.RData",scenario8 = "simdata_highdim_outlier0.1_param4_0314.RData",scenario9 = "simdata_highdim_outlier0.2_param4_0314.RData",designed_params=data.frame(X1=0,X2=0,X3=3,X4=0,X5=-3,X6=0,X1000=5),name="Param4_highdim")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(10,0,0,10,0,0,5),colnames_dt=c("X1","X2","X3","X4","X5","X6","X30"),given_names = c("X1","X4","X30"),scenario1="simdata_lowdim_param5_0314.RData",scenario2 = "simdata_lowdim_outlier0.001_param5_0314.RData",scenario3 = "simdata_lowdim_outlier0.002_param5_0314.RData",scenario4 = "simdata_lowdim_outlier0.005_param5_0314.RData",scenario5 = "simdata_lowdim_outlier0.01_param5_0314.RData",scenario6 = "simdata_lowdim_outlier0.02_param5_0314.RData",scenario7 = "simdata_lowdim_outlier0.05_param5_0314.RData",scenario8 = "simdata_lowdim_outlier0.1_param5_0314.RData",scenario9 = "simdata_lowdim_outlier0.2_param5_0314.RData",designed_params=data.frame(X1=10,X2=0,X3=0,X4=10,X5=0,X6=0,X30=5),name="Param5_lowdim")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(10,0,0,10,0,0,5),colnames_dt=c("X1","X2","X3","X4","X5","X6","X1000"),given_names = c("X1","X4","X1000"),scenario1="simdata_highdim_param5_0314.RData",scenario2 = "simdata_highdim_outlier0.001_param5_0314.RData",scenario3 = "simdata_highdim_outlier0.002_param5_0314.RData",scenario4 = "simdata_highdim_outlier0.005_param5_0314.RData",scenario5 = "simdata_highdim_outlier0.01_param5_0314.RData",scenario6 = "simdata_highdim_outlier0.02_param5_0314.RData",scenario7 = "simdata_highdim_outlier0.05_param5_0314.RData",scenario8 = "simdata_highdim_outlier0.1_param5_0314.RData",scenario9 = "simdata_highdim_outlier0.2_param5_0314.RData",designed_params=data.frame(X1=10,X2=0,X3=0,X4=10,X5=0,X6=0,X1000=5),name="Param5_highdim")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6.5}
+get_figures(beta=c(2,0,0,-2,0,0,2),colnames_dt=c("X1","X2","X3","X4","X5","X6","X30"),given_names = c("X1","X4","X30"),scenario1="simdata_lowdim_param6_0314.RData",scenario2 = "simdata_lowdim_outlier0.001_param6_0314.RData",scenario3 = "simdata_lowdim_outlier0.002_param6_0314.RData",scenario4 = "simdata_lowdim_outlier0.005_param6_0314.RData",scenario5 = "simdata_lowdim_outlier0.01_param6_0314.RData",scenario6 = "simdata_lowdim_outlier0.02_param6_0314.RData",scenario7 = "simdata_lowdim_outlier0.05_param6_0314.RData",scenario8 = "simdata_lowdim_outlier0.1_param6_0314.RData",scenario9 = "simdata_lowdim_outlier0.2_param6_0314.RData",designed_params=data.frame(X1=2,X2=0,X3=0,X4=-2,X5=0,X6=0,X30=2),name="Param6_lowdim")
+```
+
+
+```{r fig.align="center", echo = TRUE,fig.width = 10, fig.height=6}
+get_figures(beta=c(2,0,0,-2,0,0,2),colnames_dt=c("X1","X2","X3","X4","X5","X6","X1000"),given_names = c("X1","X4","X1000"),scenario1="simdata_highdim_param6_0314.RData",scenario2 = "simdata_highdim_outlier0.001_param6_0314.RData",scenario3 = "simdata_highdim_outlier0.002_param6_0314.RData",scenario4 = "simdata_highdim_outlier0.005_param6_0314.RData",scenario5 = "simdata_highdim_outlier0.01_param6_0314.RData",scenario6 = "simdata_highdim_outlier0.02_param6_0314.RData",scenario7 = "simdata_highdim_outlier0.05_param6_0314.RData",scenario8 = "simdata_highdim_outlier0.1_param6_0314.RData",scenario9 = "simdata_highdim_outlier0.2_param6_0314.RData",designed_params=data.frame(X1=2,X2=0,X3=0,X4=-2,X5=0,X6=0,X1000=2),name="Param6_highdim")
+```
+
+```{r}
+param3highdimsmall=get_figures(beta=c(2,-3,3,-2,-3,3,2),colnames_dt=c("X1","X2","X3","X4","X5","X6","X1000"),given_names = c("X1","X2","X3","X4","X5","X6","X1000"),scenario1="simdata_highdim_param3_0308.RData",scenario2 = "simdata_highdim_outlier0.001_param3_0308.RData",scenario3 = "simdata_highdim_outlier0.002_param3_0308.RData",scenario4 = "simdata_highdim_outlier0.005_param3_0308.RData",scenario5 = "simdata_highdim_outlier0.01_param3_0308.RData",scenario6 = "simdata_highdim_outlier0.02_param3_0308.RData",scenario7 = "simdata_highdim_outlier0.05_param3_0308.RData",scenario8 = "simdata_highdim_outlier0.1_param3_0308.RData",scenario9 = "simdata_highdim_outlier0.2_param3_0308.RData",designed_params=data.frame(X1=2,X2=-3,X3=3,X4=-2,X5=-3,X6=3,X1000=2),name="Param3_highdim")
+
+param3highdimlarge=get_figures(beta=c(2,-3,3,-2,-3,3,2),colnames_dt=c("X1","X2","X3","X4","X5","X6","X1000"),given_names = c("X1","X2","X3","X4","X5","X6","X1000"),scenario1="simdata_highdim_param3_0311.RData",scenario2 = "simdata_highdim_outlier0.001_param3_0311.RData",scenario3 = "simdata_highdim_outlier0.002_param3_0311.RData",scenario4 = "simdata_highdim_outlier0.005_param3_0311.RData",scenario5 = "simdata_highdim_outlier0.01_param3_0311.RData",scenario6 = "simdata_highdim_outlier0.02_param3_0311.RData",scenario7 = "simdata_highdim_outlier0.05_param3_0311.RData",scenario8 = "simdata_highdim_outlier0.1_param3_0311.RData",scenario9 = "simdata_highdim_outlier0.2_param3_0311.RData",designed_params=data.frame(X1=2,X2=-3,X3=3,X4=-2,X5=-3,X6=3,X1000=2),name="Param3_highdim_1000")
+
+length(param3highdimlarge)
+length(param3highdimlarge[[7]])
+
+#0.1outlier level for mean, sum abs and mse heatmap
+gg_heatmap_data <- melt(param3highdimsmall[[7]][[8]], id.vars = c("method"), variable.name = "variables")
+ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(-3,3),colours = c("#2166AC", "#67A9CF" ,"#D1E5F0", "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,2)), color = "black", size = 4)+ggtitle("EST (n=300)")
+p1=ggheatmap
+
+gg_heatmap_data <- melt(param3highdimlarge[[7]][[8]], id.vars = c("method"), variable.name = "variables")
+ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(-3,3),colours = c("#2166AC", "#67A9CF" ,"#D1E5F0", "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,2)), color = "black", size = 4)+ggtitle("EST (n=1000)")
+p2=ggheatmap
+
+gg_heatmap_data1 <- melt(param3highdimsmall[[7]][[8]], id.vars = c("method"), variable.name = "variables")
+gg_heatmap_data2 <- melt(param3highdimlarge[[7]][[8]], id.vars = c("method"), variable.name = "variables")
+gg_heatmap_data=gg_heatmap_data1
+gg_heatmap_data$value=abs(gg_heatmap_data1$value-gg_heatmap_data2$value)
+ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(-3,3),colours = c("#2166AC", "#67A9CF" ,"#D1E5F0", "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,2)), color = "black", size = 4)+ggtitle("EST (n=300)-EST (n=1000)")
+p3=ggheatmap
+
+gg_heatmap_data <- melt(param3highdimsmall[[8]][[8]], id.vars = c("method"), variable.name = "variables")
+ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,3),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Absolute value ')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,2)), color = "black", size = 4)+ggtitle("ABS (n=300)")
+p4=ggheatmap
+
+gg_heatmap_data <- melt(param3highdimlarge[[8]][[8]], id.vars = c("method"), variable.name = "variables")
+ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,3),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Absolute value')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,2)), color = "black", size = 4)+ggtitle("ABS (n=1000)")
+p5=ggheatmap
+
+
+gg_heatmap_data1 <- melt(param3highdimsmall[[8]][[8]], id.vars = c("method"), variable.name = "variables")
+gg_heatmap_data2 <- melt(param3highdimlarge[[8]][[8]], id.vars = c("method"), variable.name = "variables")
+gg_heatmap_data=gg_heatmap_data1
+gg_heatmap_data$value=abs(gg_heatmap_data1$value-gg_heatmap_data2$value)
+ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,3),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Absolute value')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,2)), color = "black", size = 4)+ggtitle("ABS (n=300)-ABS (n=1000)")
+p6=ggheatmap
+
+gg_heatmap_data <- melt(param3highdimsmall[[9]][[8]], id.vars = c("method"), variable.name = "variables")
+ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,10),colours = c( "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'MSE')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,2)), color = "black", size = 4)+ggtitle("MSE (n=300)")
+p7=ggheatmap
+
+gg_heatmap_data <- melt(param3highdimlarge[[9]][[8]], id.vars = c("method"), variable.name = "variables")
+ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,10),colours = c("#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'MSE')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,2)), color = "black", size = 4)+ggtitle("MSE (n=1000)")
+p8=ggheatmap
+
+gg_heatmap_data1 <- melt(param3highdimsmall[[9]][[8]], id.vars = c("method"), variable.name = "variables")
+gg_heatmap_data2 <- melt(param3highdimlarge[[9]][[8]], id.vars = c("method"), variable.name = "variables")
+gg_heatmap_data=gg_heatmap_data1
+gg_heatmap_data$value=abs(gg_heatmap_data1$value-gg_heatmap_data2$value)
+ggheatmap <-ggplot(gg_heatmap_data, aes(variables, method, fill= value)) + 
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(0,10),colours = c("#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'MSE')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,2)), color = "black", size = 4)+ggtitle("MSE (n=300)-MSE (n=1000)")
+p9=ggheatmap
+
+library(gridExtra)
+gg=grid.arrange(p1,p2,p3,p4,p5,p6,p7,p8,p9,ncol = 3) 
+ggsave(file="obsnum.pdf",gg,height = 12,width=15)
+
+
+
+
+```
+
