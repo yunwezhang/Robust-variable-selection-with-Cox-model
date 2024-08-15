@@ -207,5 +207,5 @@ result2=run_fun_outlier(1,model_name = "lasso",outlier = TRUE,outlier_percentage
 ```
 
 ### Results
-
+![Example Image](Figures/image.png)
 
