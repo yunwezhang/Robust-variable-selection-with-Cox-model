@@ -207,5 +207,41 @@ result2=run_fun_outlier(1,model_name = "lasso",outlier = TRUE,outlier_percentage
 ```
 
 ### Results
-![Example Image](Figures/image.png)
+![Example Image](figures/image.png)
+
+This results show the selected variables and their estimated coefficients.
+
+## A real data example
+
+### Load the data from a .csv file
+```
+current_data=read.csv("UVM.csv")
+current_data2=current_data
+colnames(current_data2)[(dim(current_data2)[2]-2):dim(current_data2)[2]]=c("control_var","status","time")
+current_data2$time=as.numeric(current_data2$time)
+current_data2=current_data2[current_data2$time>0,]
+current_data2=current_data2[!is.na(current_data2$time),]
+current_data2$control_var=ifelse(current_data2$control_var=="FEMALE",0,1) #female is group0 as the proportion control
+current_data2=current_data2[,-which(colnames(current_data2)=="control_var")]
+current_data2=current_data2[,-1]
+dim(current_data2)
+```
+
+
+### Ger results
+```
+lasso_result=result_cal(current_data2,model_name="lasso")
+enet_result=result_cal(current_data2,model_name="enet")
+mnet_result=result_cal(current_data2,model_name="mnet")
+snet_result=result_cal(current_data2,model_name="snet")
+source("pawph_mcp.R")
+pawphmcp_result=result_cal(current_data2,model_name="pawph")
+source("pawph_scad.R")
+pawphscad_result=result_cal(current_data2,model_name="pawph")
+sis_result=result_cal(current_data2,model_name="SIS")
+
+```
+
+### Summarise results in a heatmap
+![Example Image](figures/image.png)
 
