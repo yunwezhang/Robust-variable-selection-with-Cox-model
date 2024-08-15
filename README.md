@@ -4,3 +4,8 @@ This repository provides codes for comparing robust and non-robust variable sele
 We provide the dependent packages 'ncvreg2' as a .zip file and the source files: 'pawph.R', 'pawph_mcp.R' and 'pawph_scad.R'. 
 
 This repository corresponds to our manuscript xxx. We also include all high-resolution figures under the 'Figure' folder. 
+
+## install the "ncvreg2" package
+```
+install.packages('ncvreg2_3.13.0.tar.gz', repos=NULL, type='source')
+```
