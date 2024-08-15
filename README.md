@@ -243,5 +243,5 @@ sis_result=result_cal(current_data2,model_name="SIS")
 ```
 
 ### Summarise results in a heatmap
-![Example Image](figures/image.png)
+![Example Image](figures/uvm_heatmap0613.pdf)
 
