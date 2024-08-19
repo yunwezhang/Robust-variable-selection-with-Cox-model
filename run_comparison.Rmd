@@ -1,0 +1,347 @@
+---
+title: "Slelective benchmark for robust & non-robust variable selection cox model based methods for high-dim bioinformatics data"
+author: "Yunwei Zhang"
+date: “`r paste0('Initiated on 20240813, compiled on ', format(Sys.time(), '%Y %b %d'))`”
+output:
+  
+  html_document:
+    code_folding: hide
+    fig_height: 8
+    fig_width: 12
+    highlight: tango
+    number_sections: yes
+    theme: cosmo
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: yes
+      smooth_scroll: no
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+    number_sections: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE)
+```
+
+```
+note: dependent packages need to be installed before load the package.
+The "ncvreg2" package is required to run the "penalised weighted proportional hazard model" (pawph), for more information, we suggest users to go to their Github repo: https://github.com/r08in/PAWPH
+```
+
+# Load required packages
+```{r}
+library(Matrix)
+#install.packages("htmltools",version="0.5.7")
+#library(htmltools)
+library(dplyr)
+library(survival)
+library(glmnet)
+library(ncvreg)
+library(ggplot2)
+library(caret)
+library(Hmisc)
+library(SIS)
+library(MASS)
+library(ncvreg2)
+library(faux)
+library(ggpubr)
+library(hdnom)
+library(purrr)
+library(reshape2)
+library(data.table)
+library(gbm)
+```
+
+# Function for all methods
+```{r}
+result_cal=function(current_data2,model_name){
+  X=as.matrix(current_data2[,!colnames(current_data2)%in%c("time","status")])
+  y=Surv(current_data2$time,current_data2$status)
+  time=current_data2$time
+  status=current_data2$status
+  if(model_name=="pawph"){
+    model6 <- prcoxreg(y,X, seed=1, alpha= 0.5)
+    # PAWPH estimator
+    result=model6$betaHat_re
+    output=result[result!=0]}
+  if(model_name=="ncvreg"){
+    #ncvreg
+    method1<-ncvreg::cv.ncvsurv(X,y,gamma=3,penalty="MCP",alpha=1,nfolds=10)
+    result=method1$fit$beta[,which(method1$fit$lambda==method1$lambda.min)]
+    output=result[result!=0]
+  }
+  if(model_name=="SIS"){
+    model2=SIS(X,y,family='cox', penalty='lasso', tune='bic', varISIS='cons',seed=41,nfolds = 10,type.measure = "deviance")
+    #colnames(X)[model2$ix]
+    result=model2$coef.est
+    output=result[result!=0]
+  }
+  if(model_name=="lasso"){
+    #lasso
+    fitlasso1<-hdnom::fit_lasso(X, Surv(time, status), nfolds = 10, rule = "lambda.min")
+    mat=fitlasso1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat@x
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="enet"){
+    #enet
+    fitenet1<-hdnom::fit_enet(X, Surv(time, status), nfolds = 10, rule = "lambda.min")
+    mat=fitenet1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_enet1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat@x
+    )
+    output=non_zero_values_enet1
+  }
+  if(model_name=="alasso"){
+    #alasso
+    fitlasso1<-hdnom::fit_alasso(X, Surv(time, status), nfolds = 10, rule = "lambda.min")
+    mat=fitlasso1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat@x
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="aenet"){
+    #aenet
+    fitenet1<-hdnom::fit_aenet(X, Surv(time, status), nfolds = 10, rule = "lambda.min")
+    mat=fitenet1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_enet1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat@x
+    )
+    output=non_zero_values_enet1
+  }
+  if(model_name=="scad"){
+    #alasso
+    fitlasso1<-hdnom::fit_scad(X, Surv(time, status), nfolds = 10)
+    mat=fitlasso1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat[non_zero_indices[, 1],1]
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="mnet"){
+    #aenet
+    fitenet1<-hdnom::fit_mnet(X, Surv(time, status), nfolds = 10)
+    mat=fitenet1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat[non_zero_indices[, 1],1]
+    )
+    output=non_zero_values_lasso1
+  }
+  if(model_name=="snet"){
+    #aenet
+    fitenet1<-hdnom::fit_snet(X, Surv(time, status), nfolds = 10)
+    mat=fitenet1$model$beta
+    non_zero_indices <- which(mat[] != 0, arr.ind = TRUE)
+    non_zero_values_lasso1 <- data.frame(
+      Name = rownames(mat)[non_zero_indices[, 1]],
+      Value = mat[non_zero_indices[, 1],1]
+    )
+    output=non_zero_values_lasso1
+  }
+  return(list(output,table(current_data2$status)))
+}
+```
+
+# A simulated dataset example
+
+Simulation function
+```{r}
+sim_data_fun=function(seed,n,p,beta,outlier,h0,k.shape,outlier_percentage){
+  set.seed(seed)
+  corr_matrix <- matrix(0.1, nrow = p, ncol = p)
+  diag(corr_matrix) <- 1
+  #first 3 are highly correlated
+  corr_matrix[1, 2] <- 0.9
+  corr_matrix[1, 3] <- 0.9
+  corr_matrix[2, 1] <- 0.9
+  corr_matrix[3, 1] <- 0.9
+  corr_matrix[2, 3] <- 0.9
+  corr_matrix[3, 2] <- 0.9
+  #4,5,6 are highly correlated
+  corr_matrix[4, 5] <- 0.7
+  corr_matrix[4, 6] <- 0.7
+  corr_matrix[5, 4] <- 0.7
+  corr_matrix[5, 6] <- 0.7
+  corr_matrix[6, 4] <- 0.7
+  corr_matrix[6, 5] <- 0.7
+  #4 is not correlated with 1,2,3
+  corr_matrix[1, 4] <- 0
+  corr_matrix[2, 4] <- 0
+  corr_matrix[3, 4] <- 0
+  corr_matrix[4, 1] <- 0
+  corr_matrix[4, 2] <- 0
+  corr_matrix[4, 3] <- 0
+  
+  X <- mvrnorm(n, mu=rep(0,p),Sigma = corr_matrix)
+  colnames(X)=paste0("X", 1:p, "")
+  r.u <- runif(n)
+  if(outlier==TRUE){
+    num.out <- n*outlier_percentage#5%outliers
+    gamma <- c(rep(0, n-num.out),  rep(5,ceiling(num.out)))
+    ftime <- (-log(r.u)/((h0^k.shape)*exp(X %*% beta))+gamma)^(1/k.shape)
+    ctime=runif(n,min=0,max=10)
+    time <- pmin(ftime, ctime)
+    status <- as.numeric(ftime <= ctime)
+    current_data2=cbind.data.frame(time,status,X)
+  } else{
+    
+    ftime <- (-log(r.u)/((h0^k.shape)*exp(X %*% beta)))^(1/k.shape)
+    ctime=runif(n,min=0,max=10)
+    time <- pmin(ftime, ctime)
+    status <- as.numeric(ftime <= ctime)
+    current_data2=cbind.data.frame(time,status,X)
+  }
+  return(current_data2)
+}
+
+```
+
+With/without outliers and vary outlier levels
+```{r}
+run_fun_outlier=function(iter,model_name,outlier,h0,k.shape,outlier_percentage){
+  current_data=sim_data_fun(iter,n=300,p=1000,beta=c(0,0,3,0,-3,0,rep(0,1000-7),5),outlier,h0=0.5,k.shape=5,outlier_percentage=outlier_percentage)
+  result_cal_result=result_cal(current_data,model_name)
+  return(result_cal_result)
+}
+```
+
+Run examples
+```{r}
+result1=run_fun_outlier(1,model_name = "lasso",outlier = FALSE)
+result2=run_fun_outlier(1,model_name = "lasso",outlier = TRUE,outlier_percentage = 0.05)
+```
+
+Results
+```{r}
+result1[[1]]
+```
+This provides the selected variables and their estimated coefficients. 
+
+```{r}
+result2[[1]]
+```
+
+# A real data example
+
+Load the uveal melanoma cancer data 
+```{r}
+current_data=read.csv("UVM.csv")
+current_data2=current_data
+colnames(current_data2)[(dim(current_data2)[2]-2):dim(current_data2)[2]]=c("control_var","status","time")
+current_data2$time=as.numeric(current_data2$time)
+current_data2=current_data2[current_data2$time>0,]
+current_data2=current_data2[!is.na(current_data2$time),]
+dim(current_data)
+dim(current_data2)
+table(current_data2$control_var)
+current_data2$control_var=ifelse(current_data2$control_var=="FEMALE",0,1) #female is group0 as the proportion control
+table(current_data2$status)
+summary(current_data2$time)
+hist(current_data2$time)
+# #get datasets do not include gender to run other methods
+current_data2=current_data2[,-which(colnames(current_data2)=="control_var")]
+current_data2=current_data2[,-1]
+dim(current_data2)
+```
+
+
+Run
+```{r}
+lasso_result=result_cal(current_data2,model_name="lasso")
+enet_result=result_cal(current_data2,model_name="enet")
+mnet_result=result_cal(current_data2,model_name="mnet")
+snet_result=result_cal(current_data2,model_name="snet")
+source("pawph_mcp.R")
+pawphmcp_result=result_cal(current_data2,model_name="pawph")
+source("pawph_scad.R")
+pawphscad_result=result_cal(current_data2,model_name="pawph")
+sis_result=result_cal(current_data2,model_name="SIS")
+```
+
+Result comparison
+```{r}
+sis_result1=sis_result[[1]]
+ids=gsub("X", "", names(sis_result1))
+ids2=as.numeric(ids)+21
+names(sis_result1)=colnames(current_data2)[ids2]
+
+lasso_result1=lasso_result[[1]]$Value
+names(lasso_result1)=lasso_result[[1]]$Name
+enet_result1=enet_result[[1]]$Value
+names(enet_result1)=enet_result[[1]]$Name
+mnet_result1=mnet_result[[1]]$Value
+names(mnet_result1)=mnet_result[[1]]$Name
+snet_result1=snet_result[[1]]$Value
+names(snet_result1)=snet_result[[1]]$Name
+
+sis_result1=sis_result[[1]]
+ids=gsub("X", "", names(sis_result1))
+ids2=as.numeric(ids)+21
+names(sis_result1)=colnames(current_data2)[ids2]
+
+my_list=list(lasso_result1,enet_result1,mnet_result1,snet_result1,pawphmcp_result[[1]],pawphscad_result[[1]],sis_result1)
+
+# Extract all unique names
+all_names <- unique(unlist(lapply(my_list, names)))
+
+# Create an empty data frame with these names
+df <- data.frame(matrix(ncol = length(all_names), nrow = length(my_list)))
+colnames(df) <- all_names
+
+# Fill the data frame with values
+for (i in seq_along(my_list)) {
+  df[i, names(my_list[[i]])] <- my_list[[i]]
+}
+
+# df$method=factor(c("lasso","enet","mnet","snet","pawph_mcp","pawph_scad","sis"),levels = c("lasso","enet","mnet","snet","pawph_mcp","pawph_scad","sis"))
+df$method=factor(c("lasso","enet","mnet","snet","pawph_mcp","pawph_scad","sis"),levels = c("sis","mnet","snet","enet","lasso","pawph_mcp","pawph_scad"))
+
+df=df[,!colnames(df)%in%c("BMP10.27302")]
+
+gg_heatmap_data <- melt(df, id.vars = c("method"), variable.name = "variables")
+gg_heatmap_data$value=round(gg_heatmap_data$value,1)
+
+gg_heatmap_data <- gg_heatmap_data %>%
+  mutate(across(everything(), ~ replace(., . == 0, NA)))
+
+variables_with_all_na <- gg_heatmap_data %>%
+  dplyr::group_by(variables) %>%
+  dplyr::summarize(all_na = all(is.na(value))) %>%
+  dplyr::filter(all_na) %>%
+  dplyr::pull(variables)
+
+# Remove rows with these variables
+data_long <- gg_heatmap_data %>%
+  dplyr::filter(!variables %in% variables_with_all_na)
+
+
+
+ggheatmap <-ggplot(data_long, aes(variables, method, fill= value)) +
+ geom_tile(color = "grey")+scale_fill_gradientn(limits = c(-4,4),colours = c("#2166AC", "#67A9CF" ,"#D1E5F0", "#FFFFFF","#FDDBC7", "#EF8A62", "#B2182B"))+ theme(aspect.ratio = 1, text = element_text(size = 15), legend.position = "bottom") + labs(y= 'Method', x = "Variables", fill = 'Estimated params')+theme_bw()+theme(axis.text.x = element_text(color = "black", size = 15,angle = 90),axis.text.y = element_text(color = "black", size = 16))+
+  geom_text(aes(label = round(value,1)), color = "black", size = 4)
+ggheatmap
+```
+
+
+
+
+
+
