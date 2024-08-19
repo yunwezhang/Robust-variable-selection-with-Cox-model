@@ -30,6 +30,7 @@ library(hdnom)
 library(purrr)
 library(reshape2)
 library(data.table)
+library(gbm)
 ```
 
 ## The benchamrk function
