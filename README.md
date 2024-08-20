@@ -33,7 +33,7 @@ library(data.table)
 library(gbm)
 ```
 
-## The benchamrk function
+## The benchmark function
 ```
 result_cal=function(current_data2,model_name){
   X=as.matrix(current_data2[,!colnames(current_data2)%in%c("time","status")])
@@ -207,10 +207,10 @@ result1=run_fun_outlier(1,model_name = "lasso",outlier = FALSE)
 result2=run_fun_outlier(1,model_name = "lasso",outlier = TRUE,outlier_percentage = 0.05)
 ```
 
-### Results
+### Results: This results show the selected variables and their estimated coefficients.
 ![Example Image](figures/image.png)
 
-This results show the selected variables and their estimated coefficients.
+
 
 ## A real data example
 
@@ -229,7 +229,7 @@ dim(current_data2)
 ```
 
 
-### Ger results
+### Get results
 ```
 lasso_result=result_cal(current_data2,model_name="lasso")
 enet_result=result_cal(current_data2,model_name="enet")
