@@ -40,6 +40,10 @@ library(gbm)
 </details>
 
 ## The benchmark function
+
+<details>
+<summary>Click to expand</summary>
+  
 ```
 result_cal=function(current_data2,model_name){
   X=as.matrix(current_data2[,!colnames(current_data2)%in%c("time","status")])
@@ -143,9 +147,13 @@ result_cal=function(current_data2,model_name){
   return(list(output,table(current_data2$status)))
 }
 ```
+</details>
 
 ## A simulated dataset example
 
+<details>
+<summary>Click to expand</summary>
+  
 ### The function for survival data simulation
 ```
 sim_data_fun=function(seed,n,p,beta,outlier,h0,k.shape,outlier_percentage){
@@ -216,10 +224,13 @@ result2=run_fun_outlier(1,model_name = "lasso",outlier = TRUE,outlier_percentage
 ### Results: This results show the selected variables and their estimated coefficients.
 ![Example Image](figures/image.png)
 
-
+</details>
 
 ## A real data example
 
+<details>
+<summary>Click to expand</summary>
+  
 ### Load the data from a .csv file
 ```
 current_data=read.csv("UVM.csv")
@@ -252,4 +263,4 @@ sis_result=result_cal(current_data2,model_name="SIS")
 ### Summarise results in a heatmap
 [Download PDF](figures/uvm_heatmap0613.pdf)
 
-
+</details>
