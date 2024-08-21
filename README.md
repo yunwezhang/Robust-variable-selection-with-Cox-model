@@ -4,7 +4,7 @@ This repository provides codes for comparing robust and non-robust variable sele
 We provide the dependent packages 'ncvreg2' as a .zip file and the source files: 'pawph.R', 'pawph_mcp.R' and 'pawph_scad.R'. 
 
 ## This repo 
-Other files in this repository corresponds to our manuscript xxx. We include high-resolution figures under the 'figures' folder. We recommend to run the "figure1.R", "figure2.R", etc files under the figures folder to reproduce our results. The "real_data" folder contains the real data analysis results correspond to our supplementary material. The "saved_rds" folder contains codes to obtain results and saved results. It will take several weeks to get all results. Notice that not all saved results have been uploaded to reproduce all figures due to space limitation. Feel free to email the corresponding author for data and other saved results. 
+Other files in this repository corresponds to our manuscript xxx. We include high-resolution figures under the 'figures' folder. We recommend to run the "figure1.R", "figure2.R", etc files under the figures folder to reproduce our results. The "real_data" folder contains the real data analysis results correspond to our supplementary material. The "saved_rds" folder contains codes to obtain results and saved results. It will take several weeks to get all results and we suggest starting with the 'run_comparison.Rmd' file. Notice that not all saved results have been uploaded to reproduce all figures due to space limitation. Feel free to email the corresponding author for data and other saved results. 
 
 A quick start is as follows:
 
