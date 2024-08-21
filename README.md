@@ -37,6 +37,7 @@ library(reshape2)
 library(data.table)
 library(gbm)
 ```
+</details>
 
 ## The benchmark function
 ```
